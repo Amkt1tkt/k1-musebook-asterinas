@@ -1,0 +1,226 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# K1 MUSE Book: precise software-frame damage while preserving Wayland commit semantics.
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -25,6 +25,11 @@
+ 
+ mod error;
+ mod util;
++
++// K1 MUSE Book --- (avoid redundant software-frame damage)
++#[cfg(wayland_platform)]
++mod k1_damage;
++// K1 MUSE Book ---
+ 
+ use std::marker::PhantomData;
+ use std::num::NonZeroU32;
+--- a/src/wayland/mod.rs
++++ b/src/wayland/mod.rs
+@@ -15,6 +15,10 @@
+     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+ };
+ 
++// K1 MUSE Book --- (share exact-pixel logic with regression tests)
++use crate::k1_damage::{self, Damage, Prepared, Snapshot};
++// K1 MUSE Book ---
++
+ mod buffer;
+ use buffer::WaylandBuffer;
+ 
+@@ -79,6 +83,9 @@
+     buffers: Option<(WaylandBuffer, WaylandBuffer)>,
+     size: Option<(NonZeroI32, NonZeroI32)>,
+ 
++    // K1 MUSE Book --- (successful-frame identity is local to this surface)
++    k1_damage: k1_damage::State,
++    // K1 MUSE Book ---
+     /// The pointer to the window object.
+     ///
+     /// This has to be dropped *after* the `surface` field, because the `surface` field implicitly
+@@ -109,6 +116,9 @@
+             surface: Some(surface),
+             buffers: Default::default(),
+             size: None,
++            // K1 MUSE Book --- (start without a reusable frame)
++            k1_damage: k1_damage::State::default(),
++            // K1 MUSE Book ---
+             window_handle: window,
+         })
+     }
+@@ -128,6 +138,13 @@
+             })()
+             .ok_or(SoftBufferError::SizeOutOfRange { width, height })?,
+         );
++        // K1 MUSE Book --- (configure invalidates the successful-frame identity)
++        self.k1_damage.invalidate();
++        if let Some((front, back)) = self.buffers.as_mut() {
++            front.age = 0;
++            back.age = 0;
++        }
++        // K1 MUSE Book ---
+         Ok(())
+     }
+ 
+@@ -170,12 +187,19 @@
+             ));
+         };
+ 
++        // K1 MUSE Book --- (clone immutable metadata before borrowing mapped pixels)
++        let k1_snapshot = self.k1_damage.snapshot();
++        // K1 MUSE Book ---
+         let age = self.buffers.as_mut().unwrap().1.age;
+         Ok(BufferImpl {
+             stack: util::BorrowStack::new(self, |buffer| {
+                 Ok(unsafe { buffer.buffers.as_mut().unwrap().1.mapped_mut() })
+             })?,
+             age,
++            // K1 MUSE Book --- (the borrowed pixel slice is the only comparison input)
++            k1_snapshot,
++            k1_size: (width.get() as u32, height.get() as u32),
++            // K1 MUSE Book ---
+         })
+     }
+ 
+@@ -185,6 +209,13 @@
+     }
+ 
+     fn present_with_damage(&mut self, damage: &[Rect]) -> Result<(), SoftBufferError> {
++        // K1 MUSE Book --- (explicit-damage calls must not leave a stale full-frame cache)
++        self.k1_damage.invalidate();
++        if let Some((front, back)) = self.buffers.as_mut() {
++            front.age = 0;
++            back.age = 0;
++        }
++        // K1 MUSE Book ---
+         let _ = self
+             .display
+             .event_queue
+@@ -231,6 +262,79 @@
+         Ok(())
+     }
+ 
++    // K1 MUSE Book --- (logical present preserves Wayland frame callbacks)
++    fn k1_present(&mut self, prepared: Prepared) -> Result<(), SoftBufferError> {
++        let mut actual = prepared.damage;
++        if self.surface().version() < 4 && matches!(actual, Damage::Partial(_)) {
++            actual = Damage::Full;
++        }
++        let result = (|| {
++            self.display
++                .event_queue
++                .borrow_mut()
++                .dispatch_pending(&mut State)
++                .swbuf_err("Wayland dispatch failure during K1 present")?;
++            let (width, height) = self
++                .size
++                .expect("K1 present requires configured dimensions");
++            if actual != Damage::Unchanged {
++                let (front, back) = self.buffers.as_mut().expect("K1 present requires buffers");
++                std::mem::swap(front, back);
++                k1_damage::swapped_ages(&mut front.age, &mut back.age);
++                front.attach(self.surface.as_ref().unwrap());
++                if self.surface().version() < 4 {
++                    self.surface().damage(0, 0, i32::MAX, i32::MAX);
++                } else {
++                    match actual {
++                        Damage::Partial(bounds) => self.surface().damage_buffer(
++                            bounds.x as i32,
++                            bounds.y as i32,
++                            bounds.width as i32,
++                            bounds.height as i32,
++                        ),
++                        Damage::Full => {
++                            self.surface()
++                                .damage_buffer(0, 0, width.get(), height.get())
++                        }
++                        Damage::Unchanged => unreachable!(),
++                    }
++                }
++            }
++            // An unchanged frame keeps the attached buffer and all release flags.
++            // Commit pending winit frame/geometry/scale requests even without pixels.
++            self.surface().commit();
++            match self.display.event_queue.borrow_mut().flush() {
++                Ok(()) => {}
++                // The request remains queued; the owner event loop also flushes this
++                // shared connection. Never spin or block waiting for socket capacity.
++                Err(wayland_client::backend::WaylandError::Io(error))
++                    if error.kind() == std::io::ErrorKind::WouldBlock => {}
++                Err(error) => {
++                    return Err(SoftBufferError::PlatformError(
++                        Some("K1 Wayland flush failure".into()),
++                        Some(Box::new(error)),
++                    ))
++                }
++            }
++            if actual == Damage::Unchanged {
++                let (front, back) = self.buffers.as_mut().unwrap();
++                k1_damage::unchanged_ages(&mut front.age, &mut back.age);
++            }
++            Ok(())
++        })();
++        if result.is_err() {
++            // The next caller cannot trust its historical contents after a failed
++            // logical frame, even if failure happened after attach was queued.
++            if let Some((front, back)) = self.buffers.as_mut() {
++                front.age = 0;
++                back.age = 0;
++            }
++        }
++        self.k1_damage.finish(prepared, result.is_ok());
++        result
++    }
++    // K1 MUSE Book ---
++
+     fn surface(&self) -> &wl_surface::WlSurface {
+         self.surface.as_ref().unwrap()
+     }
+@@ -246,6 +350,10 @@
+ pub struct BufferImpl<'a, D: ?Sized, W> {
+     stack: util::BorrowStack<'a, WaylandImpl<D, W>, [u32]>,
+     age: u8,
++    // K1 MUSE Book --- (optional metadata does not borrow or remap the front buffer)
++    k1_snapshot: Option<Rc<Snapshot>>,
++    k1_size: (u32, u32),
++    // K1 MUSE Book ---
+ }
+ 
+ impl<'a, D: HasDisplayHandle + ?Sized, W: HasWindowHandle> BufferImpl<'a, D, W> {
+@@ -268,17 +376,26 @@
+     }
+ 
+     pub fn present(self) -> Result<(), SoftBufferError> {
+-        let imp = self.stack.into_container();
+-        let (width, height) = imp
+-            .size
+-            .expect("Must set size of surface before calling `present()`");
+-        imp.present_with_damage(&[Rect {
+-            x: 0,
+-            y: 0,
+-            // We know width/height will be non-negative
+-            width: width.try_into().unwrap(),
+-            height: height.try_into().unwrap(),
+-        }])
++        // K1 MUSE Book --- (compare complete pixels before choosing Wayland damage)
++        // let imp = self.stack.into_container();
++        // let (width, height) = imp
++        //     .size
++        //     .expect("Must set size of surface before calling `present()`");
++        // imp.present_with_damage(&[Rect {
++        //     x: 0,
++        //     y: 0,
++        //     // We know width/height will be non-negative
++        //     width: width.try_into().unwrap(),
++        //     height: height.try_into().unwrap(),
++        // }])
++        let prepared = k1_damage::prepare(
++            self.pixels(),
++            self.k1_size.0,
++            self.k1_size.1,
++            self.k1_snapshot.as_deref(),
++        );
++        self.stack.into_container().k1_present(prepared)
++        // K1 MUSE Book ---
+     }
+ }
+ 

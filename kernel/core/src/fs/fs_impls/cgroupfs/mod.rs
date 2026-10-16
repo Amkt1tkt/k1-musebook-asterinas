@@ -15,6 +15,9 @@ macro_rules! __log_prefix {
 
 mod cgroup_ns;
 mod controller;
+// K1 MUSE Book --- (cgroup v2 populated changes need inotify delivery)
+mod events;
+// K1 MUSE Book ---
 mod fs;
 mod inode;
 mod systree_node;

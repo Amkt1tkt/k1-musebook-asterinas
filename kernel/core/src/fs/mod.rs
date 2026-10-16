@@ -8,6 +8,9 @@ pub(crate) mod rootfs;
 pub(crate) mod thread_info;
 pub mod utils;
 pub mod vfs;
+// K1 MUSE Book --- (periodic writeback thread; aster.writeback=)
+pub(crate) mod writeback;
+// K1 MUSE Book ---
 
 pub use fs_impls::devtmpfs;
 pub(crate) use fs_impls::{
@@ -38,6 +41,9 @@ pub(crate) fn init_on_each_cpu() {
 pub(crate) fn init_in_first_kthread(path_resolver: &PathResolver) {
     fs_impls::init_in_first_kthread();
     initramfs::init_in_first_kthread(path_resolver).unwrap();
+    // K1 MUSE Book --- (start the periodic flusher after the initramfs is mounted)
+    writeback::init_in_first_kthread();
+    // K1 MUSE Book ---
 }
 
 pub(crate) fn init_in_first_process(ctx: &Context) {

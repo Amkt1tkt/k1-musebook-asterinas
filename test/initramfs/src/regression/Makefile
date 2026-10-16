@@ -11,8 +11,22 @@ BUILD_DIR ?= $(CUR_DIR)/../../build
 OUTPUT_DIR ?= $(BUILD_DIR)/initramfs/test
 
 # REMINDER: Whenever you change this list, update the corresponding `default.nix` file.
+# K1 MUSE Book --- (generic dyn-link / FPU tests; drm_probe is opt-in, needs libdrm)
+# SUBDIRS := \
+# 	device \
+# 	fs \
+# 	hello_world \
+# 	io \
+# 	ipc \
+# 	memory \
+# 	network \
+# 	process \
+# 	scripts \
+# 	security \
+# 	time \
 SUBDIRS := \
 	device \
+	dynamic_linking \
 	fs \
 	hello_world \
 	io \
@@ -22,7 +36,8 @@ SUBDIRS := \
 	process \
 	scripts \
 	security \
-	time \
+	time
+# K1 MUSE Book ---
 
 ifeq ($(HOST_PLATFORM), x86_64-linux)
 SUBDIRS += intel_tdx

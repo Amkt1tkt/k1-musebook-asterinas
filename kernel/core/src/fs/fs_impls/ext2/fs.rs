@@ -19,17 +19,23 @@
 //! no two writers touch the same bytes. `next_generation` is an `AtomicU32`
 //! incremented once per newly allocated inode.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+// K1 MUSE Book --- (distinguish read-only mounts from writable mount episodes)
+// use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+// K1 MUSE Book ---
 use aster_block::bio::BioCompleteFn;
 use device_id::DeviceId;
 
+// K1 MUSE Book --- (track ext2 mounted and clean state during ordered shutdown)
+//     super_block::{RawSuperBlock, SUPER_BLOCK_OFFSET, SuperBlock},
 use super::{
     block_group::{BlockGroup, RawBlockGroup},
     inode::{FilePerm, Inode, InodeDesc, RawInode},
     prelude::*,
-    super_block::{RawSuperBlock, SUPER_BLOCK_OFFSET, SuperBlock},
+    super_block::{FsState, RawSuperBlock, SUPER_BLOCK_OFFSET, SuperBlock},
 };
+// K1 MUSE Book ---
 use crate::{
     fs::{
         ext2::utils,
@@ -64,6 +70,9 @@ pub(crate) struct Ext2 {
     mount_options: Ext2MountOptions,
     /// Recorded VFS filesystem flags.
     flags: AtomicFsFlags,
+    // K1 MUSE Book --- (a previously writable root may be remounted read-only before shutdown)
+    writable_mount: AtomicBool,
+    // K1 MUSE Book ---
     /// FS event stats for VFS.
     fs_event_subscriber_stats: FsEventSubscriberStats,
     /// Per-filesystem inode generation counter.
@@ -183,13 +192,108 @@ impl Ext2 {
             group_descriptors_segment,
             mount_options,
             flags: AtomicFsFlags::new(flags),
+            // K1 MUSE Book --- (publish only after the writable mount marker is durable)
+            writable_mount: AtomicBool::new(false),
+            // K1 MUSE Book ---
             fs_event_subscriber_stats: FsEventSubscriberStats::new(),
             next_generation: AtomicU32::new(utils::duration_to_ext2_secs(utils::now())),
             self_ref: weak_self.clone(),
         });
 
+        // K1 MUSE Book --- (only a writable mount may update the on-disk mount state)
+        if !flags.contains(FsFlags::RDONLY) {
+            ext2.mark_mounted()?;
+        }
+        // K1 MUSE Book ---
+
         Ok(ext2)
     }
+
+    // K1 MUSE Book --- (ext2 clean/dirty protocol + primary superblock write)
+    /// Records the mount in the on-disk superblock: clears `VALID`, bumps the
+    /// mount count and writes the primary superblock right away.
+    fn mark_mounted(&self) -> Result<()> {
+        let mut sb_guard = self.super_block.write();
+        let state = sb_guard.state();
+        if !state.contains(FsState::VALID) {
+            error!(
+                "[ext2] superblock state {:?}: not cleanly unmounted last time (fsck wanted)",
+                state
+            );
+        }
+        sb_guard.set_state(state.difference(FsState::VALID));
+        sb_guard.record_mount(utils::now());
+        self.write_primary_super_block(&sb_guard)?;
+        // The dirty marker must reach stable storage before filesystem writes
+        // become possible; queue completion alone is not a persistence barrier.
+        self.flush_device()?;
+        self.writable_mount.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(super) fn has_writable_mount(&self) -> bool {
+        self.writable_mount.load(Ordering::Acquire)
+    }
+
+    /// Flushes everything and marks the volume clean (`VALID`) on disk.
+    pub(super) fn mark_clean(&self) -> Result<()> {
+        // Initial read-only mounts must preserve their on-disk state. A root
+        // remounted read-only after writes still needs the shutdown protocol.
+        if !self.has_writable_mount() {
+            return Ok(());
+        }
+        self.sync_all()?;
+        // A final flush after VALID is insufficient: the controller may persist
+        // that superblock before earlier metadata if power is lost mid-flush.
+        self.flush_device()?;
+        let mut sb_guard = self.super_block.write();
+        let dirty_state = sb_guard.state().difference(FsState::VALID);
+        sb_guard.set_state(dirty_state.union(FsState::VALID));
+        let result = self
+            .write_primary_super_block(&sb_guard)
+            .and_then(|()| self.flush_device());
+        if let Err(err) = result {
+            // Keep future syncs dirty and try to revoke a clean marker that may
+            // already have reached the drive. Preserve the original failure.
+            sb_guard.set_state(dirty_state);
+            if let Err(rollback_err) = self
+                .write_primary_super_block(&sb_guard)
+                .and_then(|()| self.flush_device())
+            {
+                error!(
+                    "[ext2] failed to restore dirty state after shutdown error: {:?}",
+                    rollback_err
+                );
+            }
+            return Err(err);
+        }
+        // VALID is durable only after the final barrier. Avoid rewriting an
+        // already-clean superblock in a subsequent read-only sync.
+        sb_guard.clear_dirty();
+        Ok(())
+    }
+
+    fn flush_device(&self) -> Result<()> {
+        if self.block_device.sync()? != BioStatus::Complete {
+            return_errno_with_message!(Errno::EIO, "failed to flush block device");
+        }
+        Ok(())
+    }
+
+    /// Writes only the primary superblock (block group 0). Backups are
+    /// refreshed by the regular `sync_metadata` path.
+    fn write_primary_super_block(&self, sb: &SuperBlock) -> Result<()> {
+        let raw_sb = RawSuperBlock::from(sb);
+        if self
+            .block_device
+            .write_bytes(SUPER_BLOCK_OFFSET, raw_sb.as_bytes())
+            .is_err()
+        {
+            return_errno_with_message!(Errno::EIO, "failed to write superblock");
+        }
+        Ok(())
+    }
+    // K1 MUSE Book ---
 
     /// Returns the block device.
     pub(super) fn block_device(&self) -> &dyn BlockDevice {
@@ -215,9 +319,21 @@ impl Ext2 {
     }
 
     /// Sets the per file system flags.
-    pub(super) fn set_fs_flags(&self, flags: FsFlags) {
+    // K1 MUSE Book --- (dirty the disk before a read-only instance becomes writable)
+    // pub(super) fn set_fs_flags(&self, flags: FsFlags) {
+    //     self.flags.store(flags, Ordering::Relaxed);
+    // }
+    pub(super) fn set_fs_flags(&self, flags: FsFlags) -> Result<()> {
+        if self.fs_flags().contains(FsFlags::RDONLY) && !flags.contains(FsFlags::RDONLY) {
+            self.mark_mounted()?;
+        }
+        // Remount currently does not freeze existing writable fds or shared
+        // mappings. Keep the dirty marker on rw->ro; only the ordered shutdown
+        // path, after userspace writers stop, may advertise a clean filesystem.
         self.flags.store(flags, Ordering::Relaxed);
+        Ok(())
     }
+    // K1 MUSE Book ---
 
     /// Returns a reference to the block group at `group_idx`.
     pub(super) fn block_group(&self, group_idx: usize) -> &BlockGroup {
@@ -516,6 +632,11 @@ impl Ext2 {
 
     /// Syncs cached inodes and block-group-local metadata in all groups.
     pub(super) fn sync_all(&self) -> Result<()> {
+        // K1 MUSE Book --- (do not persist cached atime changes from read-only mounts)
+        if !self.has_writable_mount() {
+            return Ok(());
+        }
+        // K1 MUSE Book ---
         // `group_descriptors_segment` is updated without a filesystem-wide lock,
         // but each group writes only its own descriptor slice under its
         // `metadata.write()` guard.  Because groups are synced sequentially and
@@ -701,6 +822,213 @@ mod test {
         },
         time::clocks,
     };
+
+    // K1 MUSE Book --- (regress clean-marker ordering and failed flush rollback)
+    fn clean_test_fixture() -> super::super::test_utils::Ext2Fixture {
+        clocks::init_for_ktest();
+        Ext2FixtureBuilder::new(1, 256).build().unwrap()
+    }
+
+    fn disk_is_clean(disk: &Ext2MemoryDisk) -> bool {
+        let raw = disk
+            .segment()
+            .read_val::<RawSuperBlock>(SUPER_BLOCK_OFFSET)
+            .unwrap();
+        raw.state & FsState::VALID.bits() != 0
+    }
+
+    fn mount_flushes_dirty_marker() {
+        let fixture = clean_test_fixture();
+        assert!(!disk_is_clean(&fixture.disk));
+        assert_eq!(fixture.disk.flush_states(), vec![0]);
+    }
+
+    fn clean_marker_follows_dirty_data_barrier() {
+        let fixture = clean_test_fixture();
+        fixture.disk.reset_flush_trace(0);
+        fixture.ext2.mark_clean().unwrap();
+        assert_eq!(fixture.disk.flush_states(), vec![0, FsState::VALID.bits()]);
+        assert!(disk_is_clean(&fixture.disk));
+    }
+
+    fn clean_persists_unsynced_file_contents() {
+        let (fixture, root) = default_fixture();
+        let child = create_file(&root, "shutdown-unsynced");
+        let payload = b"persist-before-valid";
+        let mut reader = VmReader::from(payload.as_slice()).to_fallible();
+        assert_eq!(child.write_at(0, &mut reader).unwrap(), payload.len());
+        fixture.disk.reset_flush_trace(0);
+        fixture.disk.watch_payload(payload);
+        fixture.ext2.mark_clean().unwrap();
+        let states = fixture.disk.flush_states();
+        assert_eq!(states.last(), Some(&FsState::VALID.bits()));
+        assert!(
+            states[..states.len() - 1]
+                .iter()
+                .all(|state| state & FsState::VALID.bits() == 0)
+        );
+        let payload_seen = fixture.disk.flush_payload_seen();
+        assert_eq!(payload_seen.len(), states.len());
+        // Inode fsyncs can issue earlier flushes while sync_all is running.
+        // The last dirty-state flush is the clean protocol's data barrier.
+        assert!(payload_seen[states.len() - 2]);
+        assert!(payload_seen[states.len() - 1]);
+        // Reopen from raw device contents, bypassing the original inode/page
+        // caches. This also fails if mark_clean accidentally drops sync_all.
+        let reopened = Ext2::open(fixture.disk.clone(), FsFlags::RDONLY, None).unwrap();
+        let reopened_child = reopened
+            .root_inode()
+            .unwrap()
+            .lookup("shutdown-unsynced")
+            .unwrap();
+        let mut bytes = [0u8; 20];
+        let mut writer = VmWriter::from(bytes.as_mut_slice()).to_fallible();
+        assert_eq!(
+            reopened_child.read_at(0, &mut writer).unwrap(),
+            payload.len()
+        );
+        assert_eq!(&bytes, payload);
+    }
+
+    fn failed_data_barrier_keeps_volume_dirty() {
+        let fixture = clean_test_fixture();
+        fixture.disk.reset_flush_trace(1);
+        assert_errno!(fixture.ext2.mark_clean(), Errno::EIO);
+        assert_eq!(fixture.disk.flush_states(), vec![0]);
+        assert!(!disk_is_clean(&fixture.disk));
+        assert!(!fixture.ext2.super_block().state().contains(FsState::VALID));
+    }
+
+    fn remount_readonly_still_gets_clean_on_shutdown() {
+        let fixture = clean_test_fixture();
+        fixture.disk.reset_flush_trace(0);
+        fixture.ext2.set_fs_flags(FsFlags::RDONLY).unwrap();
+        // A remount has no writer-freeze contract, so it must not claim clean.
+        assert!(!disk_is_clean(&fixture.disk));
+        assert!(fixture.disk.flush_states().is_empty());
+        FileSystemTrait::sync_for_shutdown(fixture.ext2.as_ref()).unwrap();
+        assert_eq!(fixture.disk.flush_states(), vec![0, FsState::VALID.bits()]);
+        assert!(disk_is_clean(&fixture.disk));
+    }
+
+    fn initial_readonly_mount_never_writes_or_flushes() {
+        clocks::init_for_ktest();
+        let fixture = Ext2FixtureBuilder::new(1, 256)
+            .build_with_flags(FsFlags::RDONLY)
+            .unwrap();
+        assert!(disk_is_clean(&fixture.disk));
+        assert_eq!(fixture.disk.write_count(), 0);
+        assert!(fixture.disk.flush_states().is_empty());
+        let root = fixture.root();
+        assert_errno!(root.lookup("missing"), Errno::ENOENT);
+        let atime = Duration::from_secs(123);
+        root.set_atime(atime);
+        let mut entries: Vec<String> = Vec::new();
+        root.readdir_at(0, &mut entries).unwrap();
+        assert_eq!(root.atime(), atime);
+        assert!(entries.iter().any(|name| name == "."));
+        root.sync_all().unwrap();
+        root.sync_data().unwrap();
+        crate::fs::vfs::inode::Inode::sync(root.as_ref(), crate::fs::file::SyncMode::Full).unwrap();
+        crate::fs::vfs::inode::Inode::sync(root.as_ref(), crate::fs::file::SyncMode::Data).unwrap();
+        fixture.ext2.sync_all().unwrap();
+        FileSystemTrait::sync(fixture.ext2.as_ref()).unwrap();
+        FileSystemTrait::sync_for_shutdown(fixture.ext2.as_ref()).unwrap();
+        assert!(disk_is_clean(&fixture.disk));
+        assert_eq!(fixture.disk.write_count(), 0);
+        assert!(fixture.disk.flush_states().is_empty());
+    }
+
+    fn readonly_remount_reads_do_not_dirty_a_clean_volume() {
+        let (fixture, root) = default_fixture();
+        let child = create_file(&root, "readonly-data");
+        let payload = b"pending-before-readonly";
+        let mut reader = VmReader::from(payload.as_slice()).to_fallible();
+        child.write_at(0, &mut reader).unwrap();
+        root.set_atime(Duration::from_secs(123));
+        child.set_atime(Duration::from_secs(456));
+        fixture.ext2.set_fs_flags(FsFlags::RDONLY).unwrap();
+        FileSystemTrait::sync_for_shutdown(fixture.ext2.as_ref()).unwrap();
+        assert!(disk_is_clean(&fixture.disk));
+        let writes = fixture.disk.write_count();
+        let mut entries: Vec<String> = Vec::new();
+        root.readdir_at(0, &mut entries).unwrap();
+        let mut bytes = [0u8; 23];
+        let mut writer = VmWriter::from(bytes.as_mut_slice()).to_fallible();
+        assert_eq!(child.read_at(0, &mut writer).unwrap(), payload.len());
+        assert_eq!(&bytes[..payload.len()], payload);
+        assert_eq!(root.atime(), Duration::from_secs(123));
+        assert_eq!(child.atime(), Duration::from_secs(456));
+        assert_eq!(fixture.disk.write_count(), writes);
+        crate::fs::vfs::inode::Inode::sync(root.as_ref(), crate::fs::file::SyncMode::Full).unwrap();
+        crate::fs::vfs::inode::Inode::sync(child.as_ref(), crate::fs::file::SyncMode::Data)
+            .unwrap();
+        assert_eq!(fixture.disk.write_count(), writes);
+        FileSystemTrait::sync(fixture.ext2.as_ref()).unwrap();
+        assert_eq!(fixture.disk.write_count(), writes);
+        assert!(disk_is_clean(&fixture.disk));
+    }
+
+    fn stale_lookup_preserves_directory_entry_and_disk() {
+        let (fixture, root) = default_fixture();
+        let child = create_file(&root, "stale-entry");
+        fixture.ext2.sync_all().unwrap();
+        let raw = make_raw_inode(InodeType::File as u16 | 0o644, 0, 0);
+        super::super::test_utils::write_raw_inode_to_disk(
+            &fixture.sb,
+            &fixture.descs,
+            child.ino(),
+            &raw,
+            &fixture.disk,
+        );
+        let writes = fixture.disk.write_count();
+        let readonly = Ext2::open(fixture.disk.clone(), FsFlags::RDONLY, None).unwrap();
+        let root = readonly.root_inode().unwrap();
+        for _ in 0..2 {
+            assert_errno!(root.lookup("stale-entry"), Errno::ESTALE);
+        }
+        FileSystemTrait::sync(readonly.as_ref()).unwrap();
+        FileSystemTrait::sync_for_shutdown(readonly.as_ref()).unwrap();
+        assert_eq!(fixture.disk.write_count(), writes);
+    }
+
+    fn remount_writable_persists_dirty_marker() {
+        clocks::init_for_ktest();
+        let fixture = Ext2FixtureBuilder::new(1, 256)
+            .build_with_flags(FsFlags::RDONLY)
+            .unwrap();
+        fixture.disk.reset_flush_trace(0);
+        fixture.ext2.set_fs_flags(FsFlags::empty()).unwrap();
+        assert!(!fixture.ext2.fs_flags().contains(FsFlags::RDONLY));
+        assert!(!disk_is_clean(&fixture.disk));
+        assert_eq!(fixture.disk.flush_states(), vec![0]);
+    }
+
+    fn failed_clean_barrier_restores_dirty_marker() {
+        let fixture = clean_test_fixture();
+        fixture.disk.reset_flush_trace(2);
+        assert_errno!(fixture.ext2.mark_clean(), Errno::EIO);
+        assert_eq!(
+            fixture.disk.flush_states(),
+            vec![0, FsState::VALID.bits(), 0]
+        );
+        assert!(!disk_is_clean(&fixture.disk));
+        assert!(!fixture.ext2.super_block().state().contains(FsState::VALID));
+    }
+    #[ktest]
+    fn shutdown_fsck_regression_suite() {
+        mount_flushes_dirty_marker();
+        clean_marker_follows_dirty_data_barrier();
+        clean_persists_unsynced_file_contents();
+        failed_data_barrier_keeps_volume_dirty();
+        failed_clean_barrier_restores_dirty_marker();
+        remount_readonly_still_gets_clean_on_shutdown();
+        remount_writable_persists_dirty_marker();
+        initial_readonly_mount_never_writes_or_flushes();
+        readonly_remount_reads_do_not_dirty_a_clean_volume();
+        stale_lookup_preserves_directory_entry_and_disk();
+    }
+    // K1 MUSE Book ---
 
     fn expected_overhead_blocks(sb: &SuperBlock) -> u32 {
         let nr_block_groups = sb.nr_block_groups() as usize;

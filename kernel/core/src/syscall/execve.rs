@@ -82,12 +82,33 @@ fn lookup_and_open_executable_file(
 
         let fs_ref = ctx.thread_local.borrow_fs();
         let path_resolver = fs_ref.resolver().read();
-        if flags.contains(OpenFlags::AT_SYMLINK_NOFOLLOW) {
-            path_resolver.lookup_no_follow(&fs_path)?
+        // K1 MUSE Book --- (k1.diag=proc: report exec lookup failures)
+        // if flags.contains(OpenFlags::AT_SYMLINK_NOFOLLOW) {
+        //     path_resolver.lookup_no_follow(&fs_path)?
+        // } else {
+        //     path_resolver.lookup(&fs_path)?
+        // }
+        let looked_up = if flags.contains(OpenFlags::AT_SYMLINK_NOFOLLOW) {
+            path_resolver.lookup_no_follow(&fs_path)
         } else {
-            path_resolver.lookup(&fs_path)?
+            path_resolver.lookup(&fs_path)
+        };
+        match looked_up {
+            Ok(path) => path,
+            Err(err) => {
+                super::proc_diag::note_exec_failed(ctx, &filename, err.error());
+                return Err(err);
+            }
         }
+        // K1 MUSE Book ---
     };
+
+    // K1 MUSE Book --- (boot splash milestones and k1.diag=proc exec trace)
+    if aster_framebuffer::splash::is_active() {
+        aster_framebuffer::splash::on_exec(&path.name());
+    }
+    note_exec(ctx, &path);
+    // K1 MUSE Book ---
 
     // For a non-empty `filename`, Linux derives the thread name from the
     // user-supplied exec path before symlink resolution. `execveat` with
@@ -135,6 +156,23 @@ fn lookup_and_open_executable_file(
 
     Ok((executable, thread_name))
 }
+
+// K1 MUSE Book --- (k1.diag=proc: print the resolved path before the image is replaced)
+/// `k1.diag=proc`: one line per program about to replace this process image.
+/// Printed before `UndetectedExecutable::open` / `do_execve` so a loader
+/// failure after this point (bad ELF, missing interpreter) still leaves
+/// the path on the console. The splash hook is handled separately.
+fn note_exec(ctx: &Context, path: &crate::fs::vfs::path::Path) {
+    if super::proc_diag::proc_on() {
+        let abs = {
+            let fs_ref = ctx.thread_local.borrow_fs();
+            let resolver = fs_ref.resolver().read();
+            resolver.make_abs_path(path).into_string()
+        };
+        ostd::early_println!("[proc] exec {} -> {}", super::proc_diag::who(ctx), abs);
+    }
+}
+// K1 MUSE Book ---
 
 bitflags::bitflags! {
     struct OpenFlags: u32 {

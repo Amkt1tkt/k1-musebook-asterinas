@@ -42,6 +42,9 @@ fi
 ./prctl/subreaper
 ./prctl/thread_name
 
+# K1 MUSE Book --- (futex lost-wakeup regression)
+./pthread/futex_lost_wake_test
+# K1 MUSE Book ---
 ./pthread/pthread_signal_test
 ./pthread/pthread_test
 
@@ -74,6 +77,9 @@ if [ "$(uname -m)" = "x86_64" ]; then
 fi
 
 ./cgroup.sh
+# K1 MUSE Book --- (cgroup v2 inotify/epoll population and watch identity regression)
+./cgroup_events
+# K1 MUSE Book ---
 ./group_session
 ./job_control
 ./pidfd

@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "k1-musebook-i2c"
+version = "0.1.0"
+edition.workspace = true
+
+# K1 MUSE Book: TWSI / PMIC / power-key / lid / LT8911 / I2C-HID touchpad.
+
+[dependencies]
+aster-cmdline.workspace = true
+aster-input.workspace = true
+aster-softirq.workspace = true
+component.workspace = true
+k1-musebook-gpio.workspace = true
+k1-musebook-pinctrl.workspace = true
+log.workspace = true
+ostd.workspace = true
+spin.workspace = true
+
+[lints]
+workspace = true

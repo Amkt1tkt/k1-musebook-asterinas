@@ -123,6 +123,9 @@ static AP_LATE_ENTRY: Once<fn()> = Once::new();
 /// will jump to the entry function immediately.
 pub fn register_ap_entry(entry: fn()) {
     AP_LATE_ENTRY.call_once(|| entry);
+    // K1 MUSE Book --- (APs can now service TLB-flush IPIs; skip them before this)
+    crate::smp::set_aps_online();
+    // K1 MUSE Book ---
 }
 
 /// The AP's entry point of the Rust code portion of Asterinas.

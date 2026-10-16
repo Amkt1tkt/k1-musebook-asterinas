@@ -19,6 +19,10 @@ use crate::{
 /// Options for allocating physical memory frames.
 pub struct FrameAllocOptions {
     zeroed: bool,
+    // K1 MUSE Book --- (32-bit DMA masters can only use the low bank)
+    /// When set, the frames must be reachable by a 32-bit DMA master.
+    dma_capable: bool,
+    // K1 MUSE Book ---
 }
 
 impl Default for FrameAllocOptions {
@@ -30,7 +34,13 @@ impl Default for FrameAllocOptions {
 impl FrameAllocOptions {
     /// Creates new options for allocating the specified number of frames.
     pub fn new() -> Self {
-        Self { zeroed: true }
+        // K1 MUSE Book --- (default is not DMA-capable; high bank first)
+        // Self { zeroed: true }
+        Self {
+            zeroed: true,
+            dma_capable: false,
+        }
+        // K1 MUSE Book ---
     }
 
     /// Sets whether the allocated frames should be initialized with zeros.
@@ -45,6 +55,27 @@ impl FrameAllocOptions {
         self
     }
 
+    // K1 MUSE Book --- (DMA allocations use alloc_below(dma_addr_limit))
+    /// Requires the allocated frames to be reachable by a 32-bit DMA master.
+    ///
+    /// When `true`, the allocator uses [`GlobalFrameAllocator::alloc_below`]
+    /// with [`crate::mm::dma_addr_limit`]. Off by default so ordinary
+    /// allocations take high memory first.
+    pub fn dma_capable(&mut self, dma_capable: bool) -> &mut Self {
+        self.dma_capable = dma_capable;
+        self
+    }
+
+    fn allocate(&self, layout: Layout) -> Option<Paddr> {
+        let allocator = get_global_frame_allocator();
+        if self.dma_capable {
+            allocator.alloc_below(layout, crate::mm::dma_addr_limit())
+        } else {
+            allocator.alloc(layout)
+        }
+    }
+    // K1 MUSE Book ---
+
     /// Allocates a single untyped frame without metadata.
     pub fn alloc_frame(&self) -> Result<Frame<()>> {
         self.alloc_frame_with(())
@@ -53,10 +84,17 @@ impl FrameAllocOptions {
     /// Allocates a single frame with additional metadata.
     pub fn alloc_frame_with<M: AnyFrameMeta>(&self, metadata: M) -> Result<Frame<M>> {
         let single_layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
-        let frame = get_global_frame_allocator()
-            .alloc(single_layout)
-            .map(|paddr| Frame::from_unused(paddr, metadata).unwrap())
-            .ok_or(Error::NoMemory)?;
+        // K1 MUSE Book --- (route through allocate() so dma_capable is honoured)
+        // let frame = get_global_frame_allocator()
+        //     .alloc(single_layout)
+        //     .map(|paddr| Frame::from_unused(paddr, metadata).unwrap())
+        //     .ok_or(Error::NoMemory)?;
+        let Some(paddr) = self.allocate(single_layout) else {
+            return Err(Error::NoMemory);
+        };
+        let frame =
+            Frame::from_unused(paddr, metadata).expect("the allocator must return unused frames");
+        // K1 MUSE Book ---
 
         if self.zeroed {
             let addr = paddr_to_vaddr(frame.paddr()) as *mut u8;
@@ -87,13 +125,24 @@ impl FrameAllocOptions {
         if nframes == 0 {
             return Err(Error::InvalidArgs);
         }
-        let layout = Layout::from_size_align(nframes * PAGE_SIZE, PAGE_SIZE).unwrap();
-        let segment = get_global_frame_allocator()
-            .alloc(layout)
-            .map(|start| {
-                Segment::from_unused(start..start + nframes * PAGE_SIZE, metadata_fn).unwrap()
-            })
-            .ok_or(Error::NoMemory)?;
+        // K1 MUSE Book --- (reject sizes that cannot describe a valid allocation)
+        // let layout = Layout::from_size_align(nframes * PAGE_SIZE, PAGE_SIZE).unwrap();
+        let size = nframes.checked_mul(PAGE_SIZE).ok_or(Error::InvalidArgs)?;
+        let layout = Layout::from_size_align(size, PAGE_SIZE).map_err(|_| Error::InvalidArgs)?;
+        // K1 MUSE Book ---
+        // K1 MUSE Book --- (route segment alloc through allocate() so dma_capable is honoured)
+        // let segment = get_global_frame_allocator()
+        //     .alloc(layout)
+        //     .map(|start| {
+        //         Segment::from_unused(start..start + nframes * PAGE_SIZE, metadata_fn).unwrap()
+        //     })
+        //     .ok_or(Error::NoMemory)?;
+        let Some(start) = self.allocate(layout) else {
+            return Err(Error::NoMemory);
+        };
+        let segment = Segment::from_unused(start..start + nframes * PAGE_SIZE, metadata_fn)
+            .expect("the allocator must return unused frames");
+        // K1 MUSE Book ---
 
         if self.zeroed {
             let addr = paddr_to_vaddr(segment.paddr()) as *mut u8;
@@ -127,6 +176,36 @@ fn test_alloc_dealloc() {
     }
 }
 
+// K1 MUSE Book --- (ktest: dma_capable frames stay below dma_addr_limit)
+#[cfg(ktest)]
+#[ktest(expect_redundant_test_prefix)]
+fn test_dma_capable_stays_below_limit() {
+    let limit = crate::mm::dma_addr_limit();
+    let frame = FrameAllocOptions::new()
+        .dma_capable(true)
+        .alloc_frame()
+        .expect("every platform this kernel boots has some memory below the DMA limit");
+    assert!(
+        frame.paddr() < limit,
+        "dma_capable frame {:#x} is at or above limit {:#x}",
+        frame.paddr(),
+        limit
+    );
+
+    let segment = FrameAllocOptions::new()
+        .dma_capable(true)
+        .alloc_segment(4)
+        .expect("4-page DMA segment");
+    assert!(
+        segment.paddr() + segment.size() <= limit,
+        "dma_capable segment {:#x}..{:#x} crosses limit {:#x}",
+        segment.paddr(),
+        segment.paddr() + segment.size(),
+        limit
+    );
+}
+// K1 MUSE Book ---
+
 /// The trait for the global frame allocator.
 ///
 /// OSTD allows a customized frame allocator by the [`global_frame_allocator`]
@@ -152,6 +231,18 @@ pub trait GlobalFrameAllocator: Sync {
     /// calling [`GlobalFrameAllocator::dealloc`]. If multiple frames are
     /// allocated, they may be returned in any order with any number of calls.
     fn alloc(&self, layout: Layout) -> Option<Paddr>;
+
+    // K1 MUSE Book --- (an unconstrained fallback would violate the device address limit)
+    /// Allocates a contiguous range whose last byte is strictly below `limit`.
+    ///
+    /// The default is `None`, not a fallback to [`Self::alloc`]. An
+    /// implementor that has not been taught about address constraints
+    /// must not silently hand out high memory.
+    fn alloc_below(&self, layout: Layout, limit: Paddr) -> Option<Paddr> {
+        let _ = (layout, limit);
+        None
+    }
+    // K1 MUSE Book ---
 
     /// Deallocates a contiguous range of frames.
     ///

@@ -1,0 +1,50 @@
+From b16b6eb174407a34fbbd1a2d8c566ecfbc1b3af0 Mon Sep 17 00:00:00 2001
+From: jiangjianfeng <jiangjianfeng.jjf@antgroup.com>
+Date: Wed, 17 Sep 2025 12:02:50 +0000
+Subject: [PATCH] Podman: skip post-network hosts and resolver updates
+
+K1 MUSE Book: skip hosts and resolver updates after network setup. Initial
+file creation and bind mounts retain their upstream behavior.
+
+---
+ libpod/container_internal.go | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/libpod/container_internal.go b/libpod/container_internal.go
+index 1d879d06cb..3c4c1ed921 100644
+--- a/libpod/container_internal.go
++++ b/libpod/container_internal.go
+@@ -1013,7 +1013,10 @@ func (c *Container) completeNetworkSetup() error {
+ 	}
+ 	if netDisabled {
+-		// with net=none we still want to set up /etc/hosts
+-		return c.addHosts()
++		// K1 MUSE Book --- (skip hosts updates after network setup)
++		// with net=none we still want to set up /etc/hosts
++		// return c.addHosts()
++		return nil
++		// K1 MUSE Book ---
+ 	}
+ 	if c.config.NetNsCtr != "" {
+ 		return nil
+@@ -1030,11 +1033,14 @@ func (c *Container) completeNetworkSetup() error {
+ 		}
+ 	}
+ 	// add /etc/hosts entries
++	// K1 MUSE Book --- (skip hosts and resolver updates after network setup)
+-	if err := c.addHosts(); err != nil {
+-		return err
+-	}
++	// if err := c.addHosts(); err != nil {
++	// 	return err
++	// }
+ 
+-	return c.addResolvConf()
++	// return c.addResolvConf()
++	return nil
++	// K1 MUSE Book ---
+ }
+ 
+ // Initialize a container, creating it in the runtime
+-- 
+2.34.1

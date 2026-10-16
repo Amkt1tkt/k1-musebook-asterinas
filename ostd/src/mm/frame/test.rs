@@ -306,13 +306,28 @@ mod segment {
         assert_eq!(segment.end_paddr() - segment.paddr(), range.len());
     }
 
+    // K1 MUSE Book --- (invalid frame counts are errors, not allocator panics)
+    // #[ktest]
+    // #[should_panic]
+    // fn max_segment_creation() {
+    //     // Upstream FrameAllocator panics when attempting to allocate a segment with usize::MAX frames
+    //     let max_frames = usize::MAX;
+    //     let _ = FrameAllocOptions::new().alloc_segment(max_frames);
+    // }
     #[ktest]
-    #[should_panic]
     fn max_segment_creation() {
-        // Upstream FrameAllocator panics when attempting to allocate a segment with usize::MAX frames
-        let max_frames = usize::MAX;
-        let _ = FrameAllocOptions::new().alloc_segment(max_frames);
+        for nframes in [
+            usize::MAX,
+            usize::MAX / PAGE_SIZE + 1,
+            isize::MAX as usize / PAGE_SIZE + 1,
+        ] {
+            assert!(matches!(
+                FrameAllocOptions::new().alloc_segment(nframes),
+                Err(Error::InvalidArgs)
+            ));
+        }
     }
+    // K1 MUSE Book ---
 
     #[ktest]
     fn empty_segment_creation() {

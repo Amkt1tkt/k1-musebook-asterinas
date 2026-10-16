@@ -18,7 +18,15 @@ use crate::{
     mm::paddr_to_vaddr,
 };
 
-global_asm!(include_str!("bsp_boot.S"));
+// K1 MUSE Book --- (inject USE_SV48 so boot.S skips Sv48 on Sv39-only silicon)
+#[cfg(feature = "riscv_sv39_mode")]
+pub(super) const BOOT_USE_SV48: usize = 0;
+#[cfg(not(feature = "riscv_sv39_mode"))]
+pub(super) const BOOT_USE_SV48: usize = 1;
+
+// global_asm!(include_str!("bsp_boot.S"));
+global_asm!(include_str!("bsp_boot.S"), USE_SV48 = const BOOT_USE_SV48);
+// K1 MUSE Book ---
 
 /// The Flattened Device Tree of the platform.
 pub static DEVICE_TREE: Once<Fdt> = Once::new();
@@ -28,7 +36,16 @@ fn parse_bootloader_name() -> &'static str {
 }
 
 fn parse_kernel_commandline() -> &'static str {
-    DEVICE_TREE.get().unwrap().chosen().bootargs().unwrap_or("")
+    // K1 MUSE Book --- (fdt::chosen() panics without /chosen; cmdline is optional)
+    // DEVICE_TREE.get().unwrap().chosen().bootargs().unwrap_or("")
+    let Some(chosen) = DEVICE_TREE.get().unwrap().find_node("/chosen") else {
+        return "";
+    };
+    chosen
+        .property("bootargs")
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+    // K1 MUSE Book ---
 }
 
 fn parse_initramfs() -> Option<&'static [u8]> {
@@ -58,17 +75,45 @@ fn parse_memory_regions(device_tree_paddr: usize) -> MemoryRegionArray {
 
     let device_tree = DEVICE_TREE.get().unwrap();
 
-    for region in device_tree.memory().regions() {
-        if region.size.unwrap_or(0) > 0 {
-            regions
-                .push(MemoryRegion::new(
-                    region.starting_address as usize,
-                    region.size.unwrap(),
-                    MemoryRegionType::Usable,
-                ))
-                .unwrap();
+    // K1 MUSE Book --- (walk every /memory* node: Fdt::memory() stops at the first bank)
+    // for region in device_tree.memory().regions() {
+    //     if region.size.unwrap_or(0) > 0 {
+    //         regions
+    //             .push(MemoryRegion::new(
+    //                 region.starting_address as usize,
+    //                 region.size.unwrap(),
+    //                 MemoryRegionType::Usable,
+    //             ))
+    //             .unwrap();
+    //     }
+    // }
+    //
+    // `Fdt::memory()` is `find_node("/memory")` and returns on the first match
+    // (unit address stripped), so `memory@0` hides `memory@100000000`. The K1
+    // has a low bank at 0 and a high bank at 4 GiB. Using `memory()` silently
+    // dropped the high half.
+    for node in device_tree.find_all_nodes("/memory") {
+        if node.property("device_type").and_then(|p| p.as_str()) != Some("memory") {
+            continue;
+        }
+
+        let Some(reg_iter) = node.reg() else {
+            continue;
+        };
+
+        for region in reg_iter {
+            if region.size.unwrap_or(0) > 0 {
+                regions
+                    .push(MemoryRegion::new(
+                        region.starting_address as usize,
+                        region.size.unwrap(),
+                        MemoryRegionType::Usable,
+                    ))
+                    .unwrap();
+            }
         }
     }
+    // K1 MUSE Book ---
 
     for reservation in device_tree.memory_reservations() {
         let size = reservation.size();
@@ -126,7 +171,10 @@ fn parse_memory_regions(device_tree_paddr: usize) -> MemoryRegionArray {
 }
 
 fn parse_initramfs_range() -> Option<(usize, usize)> {
-    let chosen = DEVICE_TREE.get().unwrap().find_node("/chosen").unwrap();
+    // K1 MUSE Book --- (missing /chosen is None, not a panic)
+    // let chosen = DEVICE_TREE.get().unwrap().find_node("/chosen").unwrap();
+    let chosen = DEVICE_TREE.get().unwrap().find_node("/chosen")?;
+    // K1 MUSE Book ---
     let initrd_start = chosen.property("linux,initrd-start")?.as_usize()?;
     let initrd_end = chosen.property("linux,initrd-end")?.as_usize()?;
     Some((initrd_start, initrd_end))

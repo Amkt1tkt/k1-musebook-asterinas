@@ -68,6 +68,29 @@ mod private {
             }
         }
 
+        // K1 MUSE Book --- (per-call nonblocking I/O for Wayland sockets)
+        /// Attempts I/O once for `MSG_DONTWAIT`; otherwise uses the socket's
+        /// normal blocking and timeout policy.
+        #[track_caller]
+        fn block_on_unless<F, R>(
+            &self,
+            dont_wait: bool,
+            events: IoEvents,
+            timeout: Option<Duration>,
+            mut try_op: F,
+        ) -> Result<R>
+        where
+            Self: Sized,
+            F: FnMut() -> Result<R>,
+        {
+            if dont_wait {
+                try_op()
+            } else {
+                self.block_on(events, timeout, try_op)
+            }
+        }
+        // K1 MUSE Book ---
+
         /// Handles commands specific to its protocol or socket type.
         fn protocol_ioctl(&self, _raw_ioctl: RawIoctl) -> Result<i32> {
             return_errno_with_message!(Errno::ENOTTY, "the socket ioctl command is unknown");

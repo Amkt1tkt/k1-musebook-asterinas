@@ -10,11 +10,28 @@
 //! context under its CID. One [`BioRequest`] may require several NVMe commands (MDTS /
 //! NLB limits), so those CIDs share one [`InFlightRequest`] that completes the whole
 //! `BioRequest` when the last command finishes.
+// K1 MUSE Book --- (poll the same CID table where MSI is unavailable)
+//! K1 polls each complete request before dequeuing the next; other targets retain
+//! asynchronous interrupt completion. Failed disable retains every DMA owner.
+// K1 MUSE Book ---
 
-use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec, vec::Vec};
+// K1 MUSE Book --- (retain the complete controller on unconfirmed shutdown)
+// use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    borrow::ToOwned,
+    format,
+    string::String,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
+// K1 MUSE Book ---
 use core::{
     ffi::CStr,
     hint::spin_loop,
+    // K1 MUSE Book --- (deliberate DMA quarantine after failed disable)
+    mem,
+    // K1 MUSE Book ---
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering},
     time::Duration,
@@ -28,9 +45,14 @@ use aster_block::{
 use aster_util::safe_ptr::SafePtr;
 use device_id::{DeviceId, MinorId};
 use ostd::{
-    debug, error, info,
+    debug,
+    error,
+    info,
     mm::{HasDaddr, HasSize, PAGE_SIZE, dma::DmaStream},
-    sync::{LocalIrqDisabled, PreemptDisabled, SpinLock, SpinLockGuard, WaitQueue},
+    // K1 MUSE Book --- (worker and IRQ share completion state)
+    // sync::{LocalIrqDisabled, PreemptDisabled, SpinLock, SpinLockGuard, WaitQueue},
+    sync::{LocalIrqDisabled, Mutex, SpinLock, SpinLockGuard, WaitQueue},
+    // K1 MUSE Book ---
     timer::Jiffies,
     warn,
 };
@@ -60,6 +82,18 @@ const IO_QID: usize = 1;
 // TODO: Support multiple I/O submission and completion queue pairs.
 ostd::const_assert!(IO_QID + 1 == QUEUE_NUM);
 
+// K1 MUSE Book --- (RC MSI monitor currently breaks inbound DMA; poll CQ on riscv)
+/// Poll I/O CQ completions instead of sleeping on MSI-X.
+///
+/// On SpacemiT K1 the RC wrapper MSI monitor currently breaks device→host DMA
+/// (`ENABLE_MSI=false` in `aster-pci` `k1.rs`). Admin already polls; I/O must
+/// match until MSI delivery is fixed. On other arches keep the interrupt path.
+#[cfg(target_arch = "riscv64")]
+const POLL_IO_COMPLETIONS: bool = true;
+#[cfg(not(target_arch = "riscv64"))]
+const POLL_IO_COMPLETIONS: bool = false;
+// K1 MUSE Book ---
+
 #[derive(Debug)]
 pub struct NvmeBlockDevice {
     device: NvmeDeviceInner,
@@ -67,6 +101,10 @@ pub struct NvmeBlockDevice {
     name: String,
     id: DeviceId,
     partition_manager: PartitionManager,
+    // K1 MUSE Book --- (serialize polling and retain owners if disable fails)
+    weak_self: Weak<NvmeBlockDevice>,
+    request_worker: Mutex<()>,
+    // K1 MUSE Book ---
 }
 
 static NR_NVME_DEVICE: AtomicU32 = AtomicU32::new(0);
@@ -83,36 +121,88 @@ impl NvmeBlockDevice {
             DeviceId::new(major_id, MinorId::new(index * aster_block::DEVICE_MINORS))
         };
 
-        let block_device = Arc::new(Self {
+        // K1 MUSE Book --- (keep upstream partitions and asynchronous contexts; quarantine failed registration)
+        // let block_device = Arc::new(Self {
+        //     device,
+        //     queue: BioRequestSingleQueue::new(),
+        //     name,
+        //     id,
+        //     partition_manager: PartitionManager::new(),
+        // });
+        //
+        // block_device
+        //     .device
+        //     .setup_msix_handlers(&block_device, io_msix_vectors);
+        //
+        // aster_block::register(block_device)
+        //     .map_err(|_| NvmeDeviceError::BlockDeviceRegisterFailed)?;
+        let block_device = Arc::new_cyclic(|weak_self| Self {
             device,
             queue: BioRequestSingleQueue::new(),
             name,
             id,
             partition_manager: PartitionManager::new(),
+            weak_self: weak_self.clone(),
+            request_worker: Mutex::new(()),
         });
+        if POLL_IO_COMPLETIONS {
+            info!(
+                "registering block device '{}' (CQ polling; MSI deferred)",
+                block_device.name
+            );
+        } else {
+            block_device
+                .device
+                .setup_msix_handlers(&block_device, io_msix_vectors);
+        }
+        if !register_or_stop(
+            block_device.clone(),
+            |owner| aster_block::register(owner.clone()).is_ok(),
+            |owner| owner.device.fail_and_disable(),
+            |owner| owner.device.quarantine(&owner.weak_self, None),
+        ) {
+            return Err(NvmeDeviceError::BlockDeviceRegisterFailed);
+        }
 
-        block_device
-            .device
-            .setup_msix_handlers(&block_device, io_msix_vectors);
-
-        aster_block::register(block_device)
-            .map_err(|_| NvmeDeviceError::BlockDeviceRegisterFailed)?;
-
+        // K1 MUSE Book ---
         bio_segment_pool_init();
         Ok(())
     }
 
     /// Dequeues a `BioRequest` from the software staging queue and
     /// processes the request.
+    // K1 MUSE Book --- (one polling consumer preserves request and flush order)
+    // pub fn handle_requests(&self) {
+    //     let request = self.queue.dequeue();
+    //     debug!("Handle Request: {:?}", request);
+    //     match request.type_() {
+    //         BioType::Read => self.device.read(request),
+    //         BioType::Write => self.device.write(request),
+    //         BioType::Flush => self.device.flush(request),
+    //     }
+    // }
     pub fn handle_requests(&self) {
+        // Serialize dequeue as well as submit so polling flushes cannot overtake writes.
+        let _worker = self.request_worker.lock();
         let request = self.queue.dequeue();
+        if self.device.failure.check_running().is_err() {
+            request
+                .into_bios()
+                .for_each(|bio| bio.complete(BioStatus::IoError));
+            return;
+        }
         debug!("Handle Request: {:?}", request);
         match request.type_() {
-            BioType::Read => self.device.read(request),
-            BioType::Write => self.device.write(request),
-            BioType::Flush => self.device.flush(request),
+            BioType::Read => self
+                .device
+                .submit_request(request, IoOp::Read, &self.weak_self),
+            BioType::Write => self
+                .device
+                .submit_request(request, IoOp::Write, &self.weak_self),
+            BioType::Flush => self.device.flush(request, &self.weak_self),
         }
     }
+    // K1 MUSE Book ---
 }
 
 impl aster_block::BlockDevice for NvmeBlockDevice {
@@ -149,18 +239,219 @@ fn formatted_device_name(index: u32, nsid: u32) -> String {
 
 struct NvmeDeviceInner {
     submission_queues: [SpinLock<NvmeSubmissionQueueWithRequests, LocalIrqDisabled>; QUEUE_NUM],
-    // We access completion queues only in IRQ handlers, where IRQs have already been disabled.
-    completion_queues: [SpinLock<NvmeCompletionQueue>; QUEUE_NUM],
+    // K1 MUSE Book --- (the polling worker also drains completions)
+    // // We access completion queues only in IRQ handlers, where IRQs have already been disabled.
+    // completion_queues: [SpinLock<NvmeCompletionQueue>; QUEUE_NUM],
+    completion_queues: [SpinLock<NvmeCompletionQueue, LocalIrqDisabled>; QUEUE_NUM],
+    // K1 MUSE Book ---
     completion_wait_queues: [WaitQueue; QUEUE_NUM],
     transport: NvmePciTransportLock,
     namespace: NvmeNamespace,
     dstrd: u16,
     max_io_bytes: NonZeroUsize,
     stats: NvmeStats,
+    // K1 MUSE Book --- (failed controller owns outstanding contexts until stopped)
+    controller_ready_timeout: Duration,
+    failure: FailureState<QuarantinedIo>,
+    // K1 MUSE Book ---
 }
 
 type NvmeSubmissionQueueWithRequests =
     NvmeSubmissionQueue<crate::nvme_queue::Context<SubmittedRequest>>;
+
+// K1 MUSE Book --- (failed controller retains every outstanding CID, no automatic recovery)
+/// This slot deliberately retains its own controller only if disable failed.
+/// The BIO is not completed while the device may still modify its buffers.
+struct QuarantinedIo {
+    _controller: Arc<NvmeBlockDevice>,
+    _request: Option<Arc<InFlightRequest>>,
+}
+
+/// Shared failure/ownership policy, independently testable without PCI hardware.
+struct FailureState<Q> {
+    failed: AtomicBool,
+    stopped: AtomicBool,
+    quarantine: SpinLock<Option<Q>>,
+}
+
+impl<Q> FailureState<Q> {
+    const fn new() -> Self {
+        Self {
+            failed: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
+            quarantine: SpinLock::new(None),
+        }
+    }
+
+    fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    fn check_running(&self) -> Result<(), NvmeDeviceError> {
+        if self.is_failed() {
+            Err(NvmeDeviceError::ControllerFailed)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::Acquire)
+    }
+
+    // Callers serialize commands through request_worker, or exclusive initialization.
+    fn fail_and_stop(&self, stop: impl FnOnce() -> bool) -> bool {
+        self.failed.store(true, Ordering::Release);
+        let stopped = stop();
+        self.stopped.store(stopped, Ordering::Release);
+        stopped
+    }
+
+    fn retain(&self, owner: Q) {
+        let mut slot = self.quarantine.lock();
+        if slot.is_none() {
+            *slot = Some(owner);
+        } else {
+            // A single consumer cannot get here: failed prevents another submit.
+            // Preserve both owners even if that invariant is accidentally broken.
+            drop(slot);
+            mem::forget(owner);
+            error!("NVMe quarantine already occupied; preserving additional DMA owner");
+        }
+    }
+}
+
+/// Both initialization and runtime use this bounded wait after clearing CC.EN.
+/// A fatal status bit alone neither proves nor disproves DMA quiescence.
+fn wait_for_disabled(
+    mut read_status: impl FnMut() -> u32,
+    mut expired: impl FnMut() -> bool,
+) -> bool {
+    // Publish CC.EN=0 before polling and order RDY=0 before releasing DMA.
+    ostd::mm::dma::dma_io_fence();
+    loop {
+        if read_status() & InitContext::CSTS_RDY == 0 {
+            ostd::mm::dma::dma_io_fence();
+            return true;
+        }
+        if expired() {
+            return false;
+        }
+        spin_loop();
+    }
+}
+
+/// All initialization failures converge here while the complete DMA owner lives.
+/// Forgetting is deliberate quarantine, not recovery; PCI resources remain claimed.
+fn abort_initialization<T>(mut owner: T, disable: impl FnOnce(&mut T) -> bool) -> bool {
+    if disable(&mut owner) {
+        false
+    } else {
+        mem::forget(owner);
+        true
+    }
+}
+
+/// Check the deadline even when a faulty CQ produces nonmatching entries.
+fn poll_command<T, E>(
+    mut poll_one: impl FnMut() -> Option<Result<T, E>>,
+    mut expired: impl FnMut() -> bool,
+    timeout: impl FnOnce() -> E,
+) -> Result<T, E> {
+    loop {
+        if let Some(result) = poll_one() {
+            return result;
+        }
+        if expired() {
+            return Err(timeout());
+        }
+        spin_loop();
+    }
+}
+
+/// The deadline measures lack of matching CID completions, not total BIO size.
+/// Unknown CIDs do not count as progress; a matching error CQE does.
+fn polling_stalled(deadline: &mut Duration, now: Duration, progressed: bool) -> bool {
+    if progressed {
+        *deadline = now
+            .checked_add(Duration::from_secs(3))
+            .unwrap_or(Duration::MAX);
+    }
+    now >= *deadline
+}
+
+fn begin_identify(active: &mut Option<Arc<DmaStream>>) -> Result<Arc<DmaStream>, NvmeDeviceError> {
+    if active.is_some() {
+        return Err(NvmeDeviceError::ControllerFailed);
+    }
+    let dma =
+        Arc::new(DmaStream::alloc(1, false).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?);
+    *active = Some(dma.clone());
+    Ok(dma)
+}
+/// The actual initialization sequence; tests replace only the hardware stages.
+trait ControllerInit {
+    fn reset(&mut self) -> Result<(), NvmeDeviceError>;
+    fn configure_admin(&mut self);
+    fn set_entry_size(&mut self);
+    fn enable(&mut self) -> Result<(), NvmeDeviceError>;
+    fn identify_controller(&mut self) -> Result<(), NvmeDeviceError>;
+    fn identify_ns_list(&mut self) -> Result<Vec<u32>, NvmeDeviceError>;
+    fn identify_ns(&mut self, nsid: u32) -> Result<NvmeNamespace, NvmeDeviceError>;
+    fn create_io_queues(&mut self) -> Result<IoMsixVectors, NvmeDeviceError>;
+    fn disable(&mut self) -> bool;
+}
+
+fn run_initialization<C: ControllerInit>(
+    mut context: C,
+) -> Result<(C, NvmeNamespace, IoMsixVectors), NvmeDeviceError> {
+    // Original order: reset, configure admin, set sizes, enable, Identify,
+    // namespace list, first namespace, I/O queues. No registration until success.
+    let initialized = (|| {
+        context.reset()?;
+        context.configure_admin();
+        context.set_entry_size();
+        context.enable()?;
+        context.identify_controller()?;
+        let nsids = context.identify_ns_list()?;
+        if nsids.is_empty() {
+            return Err(NvmeDeviceError::NoNamespace);
+        }
+        let namespace = context.identify_ns(nsids[0])?;
+        let vectors = context.create_io_queues()?;
+        Ok((namespace, vectors))
+    })();
+    match initialized {
+        Ok((namespace, vectors)) => Ok((context, namespace, vectors)),
+        Err(err) => {
+            if abort_initialization(context, ControllerInit::disable) {
+                error!(
+                    "NVMe initialization failed ({:?}); disable unconfirmed, all DMA quarantined",
+                    err
+                );
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Preserve the registration owner's DMA even when the registry refuses it.
+fn register_or_stop<T>(
+    owner: T,
+    register: impl FnOnce(&T) -> bool,
+    stop: impl FnOnce(&T) -> bool,
+    retain: impl FnOnce(T),
+) -> bool {
+    if register(&owner) {
+        return true;
+    }
+    if !stop(&owner) {
+        retain(owner);
+    }
+    false
+}
+
+// K1 MUSE Book ---
 
 #[derive(Clone, Copy)]
 enum IoOp {
@@ -173,29 +464,60 @@ enum IoOp {
 /// Large requests are split across several NVMe commands, so multiple
 /// [`SubmittedRequest`] entries share this state until `remaining` reaches zero.
 struct InFlightRequest {
-    // We access the BIO request only in IRQ handlers, where IRQs have already been disabled.
-    bio_request: SpinLock<Option<BioRequest>>,
+    // K1 MUSE Book --- (shared by the polling worker and interrupt completion)
+    // // We access the BIO request only in IRQ handlers, where IRQs have already been disabled.
+    // bio_request: SpinLock<Option<BioRequest>>,
+    bio_request: SpinLock<Option<BioRequest>, LocalIrqDisabled>,
+    // K1 MUSE Book ---
     remaining: AtomicUsize,
     is_failed: AtomicBool,
 }
 
 impl InFlightRequest {
+    // K1 MUSE Book --- (invalidate completed read slices before callbacks; never finish uncertain DMA)
+    // fn finish(self: Arc<Self>) {
+    //     let status = if self.is_failed.load(Ordering::Relaxed) {
+    //         BioStatus::IoError
+    //     } else {
+    //         BioStatus::Complete
+    //     };
+    //     let bio_request = {
+    //         let mut bio_request = self.bio_request.lock();
+    //         bio_request.take()
+    //     };
+    //     if let Some(bio_request) = bio_request {
+    //         bio_request.into_bios().for_each(|bio| {
+    //             bio.complete(status);
+    //         });
+    //     }
+    // }
     fn finish(self: Arc<Self>) {
         let status = if self.is_failed.load(Ordering::Relaxed) {
             BioStatus::IoError
         } else {
             BioStatus::Complete
         };
-        let bio_request = {
-            let mut bio_request = self.bio_request.lock();
-            bio_request.take()
-        };
+        let bio_request = self.bio_request.lock().take();
         if let Some(bio_request) = bio_request {
-            bio_request.into_bios().for_each(|bio| {
-                bio.complete(status);
-            });
+            for bio in bio_request.into_bios() {
+                let mut bio_status = status;
+                if bio.type_() == BioType::Read {
+                    for segment in bio.segments() {
+                        let dma = segment.dma_slice();
+                        if dma
+                            .mem_obj()
+                            .sync_from_device(dma.offset().clone())
+                            .is_err()
+                        {
+                            bio_status = BioStatus::IoError;
+                        }
+                    }
+                }
+                bio.complete(bio_status);
+            }
         }
     }
+    // K1 MUSE Book ---
 }
 
 /// Per-command completion context stored until the matching CQE arrives.
@@ -206,6 +528,46 @@ struct SubmittedRequest {
     request: Arc<InFlightRequest>,
     _prp: Option<PrpPointers>,
 }
+
+// K1 MUSE Book --- (all CIDs of one BIO request must complete before its callback)
+impl SubmittedRequest {
+    fn complete(self, failed: bool) -> Option<Arc<InFlightRequest>> {
+        if failed {
+            self.request.is_failed.store(true, Ordering::Relaxed);
+        }
+        if self.request.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            Some(self.request)
+        } else {
+            None
+        }
+    }
+}
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (confirmed stop is required before taking any outstanding CID)
+fn retire_or_retain_request(
+    current: Arc<InFlightRequest>,
+    stopped: bool,
+    take_pending: impl FnOnce() -> Vec<SubmittedRequest>,
+    retain: impl FnOnce(Arc<InFlightRequest>),
+) {
+    if !stopped {
+        // The controller owner retains the entire CID table, including PRP pages.
+        retain(current);
+        return;
+    }
+    let requests: Vec<_> = take_pending()
+        .into_iter()
+        .map(|submitted| submitted.request)
+        .collect();
+    // All command contexts and PRPs are dropped before callbacks. Repeated
+    // request references are harmless: finish takes the BIO list exactly once.
+    for request in requests.into_iter().chain(core::iter::once(current)) {
+        request.is_failed.store(true, Ordering::Relaxed);
+        request.finish();
+    }
+}
+// K1 MUSE Book ---
 
 impl core::fmt::Debug for NvmeDeviceInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -246,33 +608,38 @@ impl NvmeDeviceInner {
         let timeout_millis = timeout_units.max(1) * Self::CAP_TO_UNIT_MILLIS;
         let controller_ready_timeout = Duration::from_millis(timeout_millis);
 
-        let mut init_ctx =
-            InitContext::new(transport, dstrd, cc_mps_value, controller_ready_timeout)?;
-
-        // NVMe controller initialization sequence.
+        // K1 MUSE Book --- (all initialization errors converge while queues and active Identify remain owned)
+        // let mut init_ctx =
+        //     InitContext::new(transport, dstrd, cc_mps_value, controller_ready_timeout)?;
         //
-        // See NVMe Spec 2.0, Section 3.5 (Controller Initialization).
-        //   1. Wait for CSTS.RDY to become '0' (controller ready to be reset)
-        //   2. Configure Admin Queue by setting AQA, ASQ, and ACQ
-        //   3. Set I/O queue entry sizes (CC.IOSQES and CC.IOCQES)
-        //   4. Enable the controller by setting CC.EN to '1'
-        //   5. Wait for CSTS.RDY to become '1' (controller ready to process commands)
-        //   6. Configure MSI-X interrupts for the Admin Queue
-        init_ctx.reset_controller()?;
-        init_ctx.configure_admin_queue();
-        init_ctx.set_entry_size();
-        init_ctx.enable_controller()?;
-        init_ctx.identify_controller()?;
+        // // NVMe controller initialization sequence.
+        // //
+        // // See NVMe Spec 2.0, Section 3.5 (Controller Initialization).
+        // //   1. Wait for CSTS.RDY to become '0' (controller ready to be reset)
+        // //   2. Configure Admin Queue by setting AQA, ASQ, and ACQ
+        // //   3. Set I/O queue entry sizes (CC.IOSQES and CC.IOCQES)
+        // //   4. Enable the controller by setting CC.EN to '1'
+        // //   5. Wait for CSTS.RDY to become '1' (controller ready to process commands)
+        // //   6. Configure MSI-X interrupts for the Admin Queue
+        // init_ctx.reset_controller()?;
+        // init_ctx.configure_admin_queue();
+        // init_ctx.set_entry_size();
+        // init_ctx.enable_controller()?;
+        // init_ctx.identify_controller()?;
+        //
+        // let nsids = init_ctx.identify_ns_list()?;
+        // if nsids.is_empty() {
+        //     return Err(NvmeDeviceError::NoNamespace);
+        // }
+        //
+        // // TODO: Support exposing multiple namespaces per controller instead of only the first one.
+        // let namespace = init_ctx.identify_ns(nsids[0])?;
+        //
+        // let io_msix_vectors = init_ctx.create_io_queues()?;
+        let init_ctx = InitContext::new(transport, dstrd, cc_mps_value, controller_ready_timeout)?;
+        let (init_ctx, namespace, io_msix_vectors) = run_initialization(init_ctx)?;
 
-        let nsids = init_ctx.identify_ns_list()?;
-        if nsids.is_empty() {
-            return Err(NvmeDeviceError::NoNamespace);
-        }
-
-        // TODO: Support exposing multiple namespaces per controller instead of only the first one.
-        let namespace = init_ctx.identify_ns(nsids[0])?;
-
-        let io_msix_vectors = init_ctx.create_io_queues()?;
+        // K1 MUSE Book ---
         let device = NvmeDeviceInner {
             submission_queues: init_ctx
                 .submission_queues
@@ -284,6 +651,10 @@ impl NvmeDeviceInner {
             dstrd: init_ctx.dstrd,
             max_io_bytes: init_ctx.max_io_bytes,
             stats: NvmeStats::new(),
+            // K1 MUSE Book --- (bounded disable and persistent failure gate)
+            controller_ready_timeout: init_ctx.controller_ready_timeout,
+            failure: FailureState::new(),
+            // K1 MUSE Book ---
         };
         Ok((device, io_msix_vectors))
     }
@@ -320,26 +691,101 @@ impl NvmeDeviceInner {
         }
     }
 
-    fn read(&self, request: BioRequest) {
-        self.submit_request(request, IoOp::Read);
-    }
+    // K1 MUSE Book --- (polling and IRQ use the same multi-command submission path)
+    // fn read(&self, request: BioRequest) {
+    //     self.submit_request(request, IoOp::Read);
+    // }
 
-    fn write(&self, request: BioRequest) {
-        self.submit_request(request, IoOp::Write);
-    }
+    // K1 MUSE Book ---
 
-    fn flush(&self, request: BioRequest) {
+    // K1 MUSE Book --- (polling and IRQ use the same multi-command submission path)
+    // fn write(&self, request: BioRequest) {
+    //     self.submit_request(request, IoOp::Write);
+    // }
+
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (propagate controller ownership and synchronize shared DMA slices)
+    // fn flush(&self, request: BioRequest) {
+    //     let entry = nvme_cmd::io_flush(self.namespace.id);
+    //     let inflight = Arc::new(InFlightRequest {
+    //         bio_request: SpinLock::new(Some(request)),
+    //         remaining: AtomicUsize::new(1),
+    //         is_failed: AtomicBool::new(false),
+    //     });
+    //     self.submit_io_commands(&inflight, vec![(entry, None)]);
+    // }
+    fn flush(&self, request: BioRequest, owner: &Weak<NvmeBlockDevice>) {
         let entry = nvme_cmd::io_flush(self.namespace.id);
         let inflight = Arc::new(InFlightRequest {
             bio_request: SpinLock::new(Some(request)),
             remaining: AtomicUsize::new(1),
             is_failed: AtomicBool::new(false),
         });
-        self.submit_io_commands(&inflight, vec![(entry, None)]);
+        self.submit_io_commands(&inflight, vec![(entry, None)], owner);
     }
+    // K1 MUSE Book ---
 
-    /// Builds and submits all NVMe commands for `bio_request` without waiting for completion.
-    fn submit_request(&self, bio_request: BioRequest, io_op: IoOp) {
+    // K1 MUSE Book --- (K1 polling waits for the same multi-command request)
+    // /// Builds and submits all NVMe commands for `bio_request` without waiting for completion.
+    /// Builds all commands and submits them through polling or interrupt completion.
+    // K1 MUSE Book ---
+    // K1 MUSE Book --- (propagate controller ownership and synchronize shared DMA slices)
+    // fn submit_request(&self, bio_request: BioRequest, io_op: IoOp) {
+    //     let mut prepared = Vec::new();
+    //     let mut is_build_failed = false;
+    //     let mut lba = bio_request.sid_range().start.to_raw();
+    //
+    //     for bio in bio_request.bios() {
+    //         for segment in bio.segments() {
+    //             let dma_slice = segment.dma_slice();
+    //             // `BioSegment` should guarantee that the segment's address and the size is
+    //             // aligned to sectors.
+    //             debug_assert!(dma_slice.daddr().is_multiple_of(SECTOR_SIZE));
+    //             debug_assert!(dma_slice.size().is_multiple_of(SECTOR_SIZE));
+    //
+    //             let mut dma_addr = dma_slice.daddr() as u64;
+    //             let mut remaining_bytes = dma_slice.size();
+    //
+    //             while let Some(remaining) = NonZeroUsize::new(remaining_bytes) {
+    //                 let chunk_bytes = remaining.min(self.max_io_bytes);
+    //                 debug_assert!(chunk_bytes.get().is_multiple_of(SECTOR_SIZE));
+    //
+    //                 match self.build_io_command(lba, dma_addr, chunk_bytes, io_op) {
+    //                     Ok(cmd) => prepared.push(cmd),
+    //                     Err(_) => {
+    //                         is_build_failed = true;
+    //                     }
+    //                 }
+    //
+    //                 let chunk_sectors = (chunk_bytes.get() / SECTOR_SIZE) as u64;
+    //                 lba += chunk_sectors;
+    //                 dma_addr += chunk_bytes.get() as u64;
+    //                 remaining_bytes -= chunk_bytes.get();
+    //             }
+    //         }
+    //     }
+    //
+    //     if prepared.is_empty() {
+    //         let status = if is_build_failed {
+    //             BioStatus::IoError
+    //         } else {
+    //             BioStatus::Complete
+    //         };
+    //         bio_request.into_bios().for_each(|bio| {
+    //             bio.complete(status);
+    //         });
+    //         return;
+    //     }
+    //
+    //     let request = Arc::new(InFlightRequest {
+    //         bio_request: SpinLock::new(Some(bio_request)),
+    //         remaining: AtomicUsize::new(prepared.len()),
+    //         is_failed: AtomicBool::new(is_build_failed),
+    //     });
+    //     self.submit_io_commands(&request, prepared);
+    // }
+    fn submit_request(&self, bio_request: BioRequest, io_op: IoOp, owner: &Weak<NvmeBlockDevice>) {
         let mut prepared = Vec::new();
         let mut is_build_failed = false;
         let mut lba = bio_request.sid_range().start.to_raw();
@@ -347,6 +793,16 @@ impl NvmeDeviceInner {
         for bio in bio_request.bios() {
             for segment in bio.segments() {
                 let dma_slice = segment.dma_slice();
+                // Flush dirty CPU lines before either DMA direction, including read buffers.
+                if dma_slice
+                    .mem_obj()
+                    .sync_to_device(dma_slice.offset().clone())
+                    .is_err()
+                {
+                    is_build_failed = true;
+                    lba += segment.nsectors().to_raw();
+                    continue;
+                }
                 // `BioSegment` should guarantee that the segment's address and the size is
                 // aligned to sectors.
                 debug_assert!(dma_slice.daddr().is_multiple_of(SECTOR_SIZE));
@@ -391,8 +847,9 @@ impl NvmeDeviceInner {
             remaining: AtomicUsize::new(prepared.len()),
             is_failed: AtomicBool::new(is_build_failed),
         });
-        self.submit_io_commands(&request, prepared);
+        self.submit_io_commands(&request, prepared, owner);
     }
+    // K1 MUSE Book ---
 
     fn build_io_command(
         &self,
@@ -415,49 +872,126 @@ impl NvmeDeviceInner {
     ///
     /// Each command is an SQE plus optional PRP pages (`None` for commands like flush).
     /// If the I/O SQ is full, waits until the MSI-X handler drains completions and frees slots.
+    // K1 MUSE Book --- (retain upstream batches and CID ownership with bounded K1 polling)
+    // fn submit_io_commands(
+    //     &self,
+    //     request: &Arc<InFlightRequest>,
+    //     mut commands: Vec<(NvmeCommand, Option<PrpPointers>)>,
+    // ) {
+    //     let wait_queue = &self.completion_wait_queues[IO_QID];
+    //     wait_queue.wait_until(|| {
+    //         while !commands.is_empty() {
+    //             let mut sq = self.lock_sq(IO_QID);
+    //             let n = sq.free_slots().min(commands.len());
+    //             if n == 0 {
+    //                 return None;
+    //             }
+    //
+    //             let rest = commands.split_off(n);
+    //             let batch = core::mem::replace(&mut commands, rest);
+    //
+    //             let n_submitted = batch.len();
+    //             let items = batch.into_iter().map(|(entry, prp)| {
+    //                 (
+    //                     entry,
+    //                     SubmittedRequest {
+    //                         request: request.clone(),
+    //                         _prp: prp,
+    //                     },
+    //                 )
+    //             });
+    //             sq.submit_with_items(items)
+    //                 .expect("SQ `free_slots` indicated space for this `submit_with_items`");
+    //             for _ in 0..n_submitted {
+    //                 self.stats.increment_submitted();
+    //             }
+    //         }
+    //         Some(())
+    //     });
+    // }
     fn submit_io_commands(
         &self,
         request: &Arc<InFlightRequest>,
         mut commands: Vec<(NvmeCommand, Option<PrpPointers>)>,
+        owner: &Weak<NvmeBlockDevice>,
     ) {
-        let wait_queue = &self.completion_wait_queues[IO_QID];
-        wait_queue.wait_until(|| {
-            while !commands.is_empty() {
-                let mut sq = self.lock_sq(IO_QID);
-                let n = sq.free_slots().min(commands.len());
-                if n == 0 {
-                    return None;
-                }
-
-                let rest = commands.split_off(n);
-                let batch = core::mem::replace(&mut commands, rest);
-
-                let n_submitted = batch.len();
-                let items = batch.into_iter().map(|(entry, prp)| {
-                    (
-                        entry,
-                        SubmittedRequest {
-                            request: request.clone(),
-                            _prp: prp,
-                        },
-                    )
-                });
-                sq.submit_with_items(items)
-                    .expect("SQ `free_slots` indicated space for this `submit_with_items`");
-                for _ in 0..n_submitted {
-                    self.stats.increment_submitted();
-                }
+        let submit_available = |commands: &mut Vec<(NvmeCommand, Option<PrpPointers>)>| {
+            let mut sq = self.lock_sq(IO_QID);
+            let n = sq.free_slots().min(commands.len());
+            if n == 0 {
+                return;
             }
-            Some(())
-        });
+            let rest = commands.split_off(n);
+            let batch = mem::replace(commands, rest);
+            let items = batch.into_iter().map(|(entry, prp)| {
+                (
+                    entry,
+                    SubmittedRequest {
+                        request: request.clone(),
+                        _prp: prp,
+                    },
+                )
+            });
+            sq.submit_with_items(items)
+                .expect("free SQ and CID slots checked under the queue lock");
+            for _ in 0..n {
+                self.stats.increment_submitted();
+            }
+        };
+        if !POLL_IO_COMPLETIONS {
+            self.completion_wait_queues[IO_QID].wait_until(|| {
+                submit_available(&mut commands);
+                commands.is_empty().then_some(())
+            });
+            return;
+        }
+        let mut deadline = Jiffies::elapsed()
+            .as_duration()
+            .checked_add(Duration::from_secs(3))
+            .unwrap_or(Duration::MAX);
+        loop {
+            submit_available(&mut commands);
+            let completed = self.handle_io_completions();
+            if request.remaining.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            if polling_stalled(
+                &mut deadline,
+                Jiffies::elapsed().as_duration(),
+                completed != 0,
+            ) {
+                warn!("I/O poll TIMEOUT; disabling controller before releasing DMA");
+                self.fail_and_disable();
+                retire_or_retain_request(
+                    request.clone(),
+                    self.failure.is_stopped(),
+                    || {
+                        let mut sq = self.submission_queues[IO_QID].lock();
+                        (0..QUEUE_DEPTH)
+                            .filter_map(|cid| sq.take_item(cid as u16))
+                            .collect()
+                    },
+                    |request| self.quarantine(owner, Some(request)),
+                );
+                return;
+            }
+            spin_loop();
+        }
     }
+    // K1 MUSE Book ---
 
     /// Drains ready I/O completions and finishes any requests whose commands have all completed.
     ///
     /// Each CQE is matched by CID to an entry in the I/O submission queue. Invoked from the
-    /// I/O MSI-X handler.
-    fn handle_io_completions(&self) {
+    // K1 MUSE Book --- (one completion implementation for polling and interrupts)
+    // /// I/O MSI-X handler.
+    /// I/O MSI-X handler or the K1 polling worker.
+    // K1 MUSE Book ---
+    // K1 MUSE Book --- (only matching CIDs refresh the polling stall deadline)
+    // fn handle_io_completions(&self) {
+    fn handle_io_completions(&self) -> usize {
         let completions = self.lock_cq(IO_QID).complete();
+        let mut matched = 0;
 
         let finished = {
             let mut finished = Vec::new();
@@ -478,22 +1012,28 @@ impl NvmeDeviceInner {
                 };
 
                 self.stats.increment_completed();
+                matched += 1;
 
-                if completion.has_error() {
-                    submitted_request
-                        .request
-                        .is_failed
-                        .store(true, Ordering::Relaxed);
+                // K1 MUSE Book --- (share final-command completion with lifecycle tests)
+                // if completion.has_error() {
+                //     submitted_request
+                //         .request
+                //         .is_failed
+                //         .store(true, Ordering::Relaxed);
+                // }
+                //
+                // if submitted_request
+                //     .request
+                //     .remaining
+                //     .fetch_sub(1, Ordering::Relaxed)
+                //     == 1
+                // {
+                //     finished.push(submitted_request.request);
+                // }
+                if let Some(request) = submitted_request.complete(completion.has_error()) {
+                    finished.push(request);
                 }
-
-                if submitted_request
-                    .request
-                    .remaining
-                    .fetch_sub(1, Ordering::Relaxed)
-                    == 1
-                {
-                    finished.push(submitted_request.request);
-                }
+                // K1 MUSE Book ---
             }
 
             finished
@@ -506,7 +1046,42 @@ impl NvmeDeviceInner {
         if !completions.is_empty() {
             self.completion_wait_queues[IO_QID].wake_all();
         }
+        matched
     }
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (quarantine the complete upstream context table)
+    fn fail_and_disable(&self) -> bool {
+        self.failure.fail_and_stop(|| {
+            {
+                let mut transport = self.transport.lock();
+                let cc = transport.regs().read32(NvmeRegs32::Cc);
+                transport
+                    .regs()
+                    .write32(NvmeRegs32::Cc, cc & !InitContext::CC_ENABLE);
+            }
+            let deadline = Jiffies::elapsed()
+                .as_duration()
+                .checked_add(self.controller_ready_timeout)
+                .unwrap_or(Duration::MAX);
+            wait_for_disabled(
+                || self.transport.lock().regs().read32(NvmeRegs32::Csts),
+                || Jiffies::elapsed().as_duration() >= deadline,
+            )
+        })
+    }
+
+    fn quarantine(&self, owner: &Weak<NvmeBlockDevice>, request: Option<Arc<InFlightRequest>>) {
+        let controller = owner
+            .upgrade()
+            .expect("the request worker owns its controller");
+        self.failure.retain(QuarantinedIo {
+            _controller: controller,
+            _request: request,
+        });
+        error!("NVMe disable unconfirmed; outstanding BIOs pending, future requests fail");
+    }
+    // K1 MUSE Book ---
 
     fn lock_sq(
         &self,
@@ -526,7 +1101,10 @@ impl NvmeDeviceInner {
     fn lock_cq(
         &self,
         qid: usize,
-    ) -> NvmeCompletionQueueAccess<'_, SpinLockGuard<'_, NvmeCompletionQueue, PreemptDisabled>>
+        // K1 MUSE Book --- (worker and IRQ share the CQ lock)
+        // ) -> NvmeCompletionQueueAccess<'_, SpinLockGuard<'_, NvmeCompletionQueue, PreemptDisabled>>
+    ) -> NvmeCompletionQueueAccess<'_, SpinLockGuard<'_, NvmeCompletionQueue, LocalIrqDisabled>>
+// K1 MUSE Book ---
     {
         NvmeCompletionQueueAccess::new(
             qid as u16,
@@ -545,6 +1123,9 @@ struct InitContext {
     cc_mps_value: u32,
     controller_ready_timeout: Duration,
     max_io_bytes: NonZeroUsize,
+    // K1 MUSE Book --- (owner survives a local Identify SafePtr on every error)
+    active_admin: Option<Arc<DmaStream>>,
+    // K1 MUSE Book ---
 }
 
 struct IoMsixVectors([u16; QUEUE_NUM - 1]);
@@ -581,6 +1162,7 @@ impl InitContext {
     /// Controller Fatal Status bit.
     const CSTS_CFS: u32 = 0x2;
 
+    // K1 MUSE Book --- (keep queue and BIO DMA owners alive until controller shutdown is confirmed)
     fn new(
         transport: NvmePciTransport,
         dstrd: u16,
@@ -599,8 +1181,27 @@ impl InitContext {
             cc_mps_value,
             controller_ready_timeout,
             max_io_bytes: MAX_BYTES_BY_NLB,
+            active_admin: None,
         })
     }
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (error cleanup does not wait for RDY=1 before clearing EN)
+    fn disable_controller(&mut self) -> bool {
+        let cc = self.transport.regs().read32(NvmeRegs32::Cc);
+        self.transport
+            .regs()
+            .write32(NvmeRegs32::Cc, cc & !Self::CC_ENABLE);
+        let deadline = Jiffies::elapsed()
+            .as_duration()
+            .checked_add(self.controller_ready_timeout)
+            .unwrap_or(Duration::MAX);
+        wait_for_disabled(
+            || self.transport.regs().read32(NvmeRegs32::Csts),
+            || Jiffies::elapsed().as_duration() >= deadline,
+        )
+    }
+    // K1 MUSE Book ---
 
     fn reset_controller(&mut self) -> Result<(), NvmeDeviceError> {
         let mut cc = self.transport.regs().read32(NvmeRegs32::Cc);
@@ -648,14 +1249,30 @@ impl InitContext {
         self.wait_controller_ready(true)
     }
 
+    // K1 MUSE Book --- (keep queue and BIO DMA owners alive until controller shutdown is confirmed)
+    // let stream =
+    //     DmaStream::alloc(1, false).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
+    // let data: SafePtr<IdentifyControllerData, DmaStream> = SafePtr::new(stream, 0);
     fn identify_controller(&mut self) -> Result<(), NvmeDeviceError> {
-        let stream =
-            DmaStream::alloc(1, false).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
-        let data: SafePtr<IdentifyControllerData, DmaStream> = SafePtr::new(stream, 0);
+        // K1 MUSE Book --- (the init owner outlives every error-returning SafePtr)
+        let stream = begin_identify(&mut self.active_admin)?;
+        let data: SafePtr<IdentifyControllerData, Arc<DmaStream>> = SafePtr::new(stream, 0);
+        // K1 MUSE Book ---
+        // K1 MUSE Book --- (flush zeroes so a dirty line cannot overwrite the DMA result)
+        let _ = data
+            .vm()
+            .sync_to_device(0..size_of::<IdentifyControllerData>());
+        // K1 MUSE Book ---
 
         let entry = nvme_cmd::identify_controller(data.daddr());
         self.submit_and_wait_polling(ADMIN_QID, entry)?;
+        self.active_admin = None;
 
+        // K1 MUSE Book --- (invalidate before reading the Identify buffer)
+        let _ = data
+            .vm()
+            .sync_from_device(0..size_of::<IdentifyControllerData>());
+        // K1 MUSE Book ---
         let result = data.read().unwrap();
 
         let serial = bytes_to_cstr_string(&result.serial);
@@ -674,15 +1291,32 @@ impl InitContext {
         );
         Ok(())
     }
+    // K1 MUSE Book ---
 
+    // K1 MUSE Book --- (keep queue and BIO DMA owners alive until controller shutdown is confirmed)
+    // let stream =
+    //     DmaStream::alloc(1, false).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
+    // let data: SafePtr<IdentifyNamespaceListData, DmaStream> = SafePtr::new(stream, 0);
     fn identify_ns_list(&mut self) -> Result<Vec<u32>, NvmeDeviceError> {
-        let stream =
-            DmaStream::alloc(1, false).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
-        let data: SafePtr<IdentifyNamespaceListData, DmaStream> = SafePtr::new(stream, 0);
+        // K1 MUSE Book --- (the init owner outlives every error-returning SafePtr)
+        let stream = begin_identify(&mut self.active_admin)?;
+        let data: SafePtr<IdentifyNamespaceListData, Arc<DmaStream>> = SafePtr::new(stream, 0);
+        // K1 MUSE Book ---
+        // K1 MUSE Book --- (non-coherent Identify buffer)
+        let _ = data
+            .vm()
+            .sync_to_device(0..size_of::<IdentifyNamespaceListData>());
+        // K1 MUSE Book ---
 
         let entry = nvme_cmd::identify_namespace_list(data.daddr(), 0);
         self.submit_and_wait_polling(ADMIN_QID, entry)?;
+        self.active_admin = None;
 
+        // K1 MUSE Book --- (invalidate so the CPU sees the device's Identify list)
+        let _ = data
+            .vm()
+            .sync_from_device(0..size_of::<IdentifyNamespaceListData>());
+        // K1 MUSE Book ---
         let result = data.read().unwrap();
 
         let nsids = result
@@ -693,15 +1327,32 @@ impl InitContext {
             .collect();
         Ok(nsids)
     }
+    // K1 MUSE Book ---
 
+    // K1 MUSE Book --- (keep queue and BIO DMA owners alive until controller shutdown is confirmed)
+    // let stream =
+    //     DmaStream::alloc(1, false).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
+    // let data: SafePtr<IdentifyNamespaceData, DmaStream> = SafePtr::new(stream, 0);
     fn identify_ns(&mut self, nsid: u32) -> Result<NvmeNamespace, NvmeDeviceError> {
-        let stream =
-            DmaStream::alloc(1, false).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
-        let data: SafePtr<IdentifyNamespaceData, DmaStream> = SafePtr::new(stream, 0);
+        // K1 MUSE Book --- (the init owner outlives every error-returning SafePtr)
+        let stream = begin_identify(&mut self.active_admin)?;
+        let data: SafePtr<IdentifyNamespaceData, Arc<DmaStream>> = SafePtr::new(stream, 0);
+        // K1 MUSE Book ---
+        // K1 MUSE Book --- (non-coherent Identify buffer)
+        let _ = data
+            .vm()
+            .sync_to_device(0..size_of::<IdentifyNamespaceData>());
+        // K1 MUSE Book ---
 
         let entry = nvme_cmd::identify_namespace(data.daddr(), nsid);
         self.submit_and_wait_polling(ADMIN_QID, entry)?;
+        self.active_admin = None;
 
+        // K1 MUSE Book --- (invalidate so the CPU sees the device's Identify NS)
+        let _ = data
+            .vm()
+            .sync_from_device(0..size_of::<IdentifyNamespaceData>());
+        // K1 MUSE Book ---
         let result = data.read().unwrap();
 
         // Parse the active LBA format to obtain the logical block size.
@@ -715,13 +1366,21 @@ impl InitContext {
             );
             return Err(NvmeDeviceError::InvalidControllerConfig);
         }
-        let fmt_idx = (result.flbas & 0x0f) as usize;
-        let lbads = (result.lbaf[fmt_idx] >> 16) & 0xff;
-        let reported_lba_size = 1u64 << lbads;
+        // K1 MUSE Book --- (reject unsupported formats before preparing data-only DMA)
+        // let fmt_idx = (result.flbas & 0x0f) as usize;
+        // let lbads = (result.lbaf[fmt_idx] >> 16) & 0xff;
+        // let reported_lba_size = 1u64 << lbads;
+        let reported_lba_size = active_lba_size(result.flbas, result.nlbaf, &result.lbaf)
+            .ok_or(NvmeDeviceError::InvalidControllerConfig)?;
+        // K1 MUSE Book ---
         if reported_lba_size != LBA_SIZE as u64 {
+            // error!(
+            // "Namespace {}: LBA size is {} bytes (LBADS={}), but driver requires {}",
+            // nsid, reported_lba_size, lbads, LBA_SIZE
+            // );
             error!(
-                "Namespace {}: LBA size is {} bytes (LBADS={}), but driver requires {}",
-                nsid, reported_lba_size, lbads, LBA_SIZE
+                "Namespace {}: LBA size is {} bytes, but driver requires {}",
+                nsid, reported_lba_size, LBA_SIZE
             );
             return Err(NvmeDeviceError::InvalidControllerConfig);
         }
@@ -735,10 +1394,15 @@ impl InitContext {
             nsze: result.nsze,
         })
     }
+    // K1 MUSE Book ---
 
     fn create_io_queues(&mut self) -> Result<IoMsixVectors, NvmeDeviceError> {
+        // K1 MUSE Book --- (skip MSI-X vectors when polling completions)
         // Pre-allocate MSI-X vectors for I/O queues
-        let io_msix_vectors = {
+        //         let io_msix_vectors = {
+        let io_msix_vectors = if POLL_IO_COMPLETIONS {
+            [0; QUEUE_NUM - 1]
+        } else {
             let mut io_msix_vectors = [0; QUEUE_NUM - 1];
             let msix_manager = self.transport.msix_manager_mut();
             for io_qid in 1..QUEUE_NUM {
@@ -749,17 +1413,28 @@ impl InitContext {
             }
             io_msix_vectors
         };
+        // K1 MUSE Book ---
 
         for io_qid in 1..QUEUE_NUM {
             let cptr = self.completion_queues[io_qid].cq_daddr();
 
-            let msix_vector = io_msix_vectors[io_qid - 1];
+            // K1 MUSE Book --- (`None` => IEN=0; required when the host MSI path is off)
+            // let msix_vector = io_msix_vectors[io_qid - 1];
+            let iv = if POLL_IO_COMPLETIONS {
+                None
+            } else {
+                Some(io_msix_vectors[io_qid - 1])
+            };
+            // K1 MUSE Book ---
 
             let entry = nvme_cmd::create_io_completion_queue(
                 io_qid as u16,
                 cptr,
                 (QUEUE_DEPTH - 1) as u16,
-                Some(msix_vector),
+                // K1 MUSE Book --- (pass IEN=0 when polling)
+                // Some(msix_vector),
+                iv,
+                // K1 MUSE Book ---
             );
             self.submit_and_wait_polling(ADMIN_QID, entry)?;
 
@@ -787,40 +1462,70 @@ impl InitContext {
             .submit(entry)
             .ok_or(NvmeDeviceError::SubmissionQueueFull)?;
 
-        loop {
-            let completions = self.cq_mut(qid).complete();
-            if completions.is_empty() {
-                spin_loop();
-                continue;
-            }
+        // K1 MUSE Book --- (bound the admin poll so a stuck CQ surfaces instead of hanging)
+        let deadline = Jiffies::elapsed()
+            .as_duration()
+            .checked_add(Duration::from_secs(3))
+            .unwrap_or(Duration::MAX);
+        // K1 MUSE Book ---
 
-            if let Some(last) = completions.last() {
-                self.submission_queues[qid].update_sq_head(last);
-            }
-
-            let mut matched = None;
-            for cqe in &completions {
-                if cqe.cid() != expected_cid {
-                    debug!(
-                        "Ignore unexpected completion in polling path: expected CID {}, got {} on QID {}",
-                        expected_cid,
-                        cqe.cid(),
-                        qid
-                    );
-                    continue;
+        // K1 MUSE Book --- (wrong-CID traffic cannot extend the timeout)
+        // loop {
+        //     let completions = self.cq_mut(qid).complete();
+        //     if completions.is_empty() {
+        //         spin_loop();
+        //         continue;
+        //     }
+        //
+        //     if let Some(last) = completions.last() {
+        //         self.submission_queues[qid].update_sq_head(last);
+        //     }
+        //
+        //     let mut matched = None;
+        //     for cqe in &completions {
+        //         if cqe.cid() != expected_cid {
+        //             debug!(
+        //                 "Ignore unexpected completion in polling path: expected CID {}, got {} on QID {}",
+        //                 expected_cid,
+        //                 cqe.cid(),
+        //                 qid
+        //             );
+        //             continue;
+        //         }
+        //         matched = Some(cqe);
+        //     }
+        //
+        //     let Some(cqe) = matched else {
+        //         continue;
+        //     };
+        //     if cqe.has_error() {
+        //         return Err(NvmeDeviceError::CommandFailed);
+        //     }
+        //
+        //     return Ok(());
+        // }
+        poll_command(
+            || {
+                let completions = self.cq_mut(qid).complete();
+                if let Some(last) = completions.last() {
+                    self.submission_queues[qid].update_sq_head(last);
                 }
-                matched = Some(cqe);
-            }
-
-            let Some(cqe) = matched else {
-                continue;
-            };
-            if cqe.has_error() {
-                return Err(NvmeDeviceError::CommandFailed);
-            }
-
-            return Ok(());
-        }
+                let cqe = completions
+                    .into_iter()
+                    .find(|cqe| cqe.cid() == expected_cid)?;
+                Some(if cqe.has_error() {
+                    Err(NvmeDeviceError::CommandFailed)
+                } else {
+                    Ok(())
+                })
+            },
+            || Jiffies::elapsed().as_duration() >= deadline,
+            || {
+                warn!("admin poll TIMEOUT qid={} cid={}", qid, expected_cid);
+                NvmeDeviceError::CommandTimedOut
+            },
+        )
+        // K1 MUSE Book ---
     }
 
     fn wait_controller_ready(&mut self, expected_ready: bool) -> Result<(), NvmeDeviceError> {
@@ -890,6 +1595,50 @@ struct IdentifyNamespaceListData {
     nsids: [u32; MAX_NS_NUM],
 }
 
+// K1 MUSE Book --- (controller format fields must not index or shift out of range)
+fn active_lba_size(flbas: u8, nlbaf: u8, formats: &[u32; 16]) -> Option<u64> {
+    if flbas & 0x60 != 0 {
+        return None;
+    }
+    let index = usize::from(flbas & 0x0f);
+    if index > usize::from(nlbaf) {
+        return None;
+    }
+    // Commands describe data-only PRPs; metadata or extended LBAs would change
+    // the transfer size and cannot fit the prepared DMA ownership range.
+    if formats[index] & 0xffff != 0 {
+        return None;
+    }
+    let exponent = (formats[index] >> 16) & 0xff;
+    if exponent < 9 {
+        return None;
+    }
+    1u64.checked_shl(exponent)
+}
+
+#[cfg(ktest)]
+#[ostd::prelude::ktest]
+fn active_lba_format_bounds() {
+    let mut formats = [0u32; 16];
+    formats[0] = 9 << 16;
+    formats[15] = 12 << 16;
+    assert_eq!(active_lba_size(0, 0, &formats), Some(512));
+    assert_eq!(active_lba_size(0x10, 0, &formats), Some(512));
+    assert_eq!(active_lba_size(15, 15, &formats), Some(4096));
+    assert_eq!(active_lba_size(15, 14, &formats), None);
+    for flbas in [0x20, 0x40, 0x60, 0xff] {
+        assert_eq!(active_lba_size(flbas, 15, &formats), None);
+    }
+    formats[0] |= 8;
+    assert_eq!(active_lba_size(0, 0, &formats), None);
+    assert_eq!(active_lba_size(0x10, 0, &formats), None);
+    for exponent in [0, 1, 8, 64, 127, 255] {
+        formats[0] = exponent << 16;
+        assert_eq!(active_lba_size(0, 0, &formats), None);
+    }
+}
+// K1 MUSE Book ---
+
 /// Identify Namespace data structure returned for CNS 00h
 /// (NVM Command Set Specification Figure 114).
 ///
@@ -907,7 +1656,10 @@ struct IdentifyNamespaceData {
     /// NSFEAT (byte 24).
     _nsfeat: u8,
     /// NLBAF: number of LBA formats supported minus one (byte 25).
-    _nlbaf: u8,
+    // K1 MUSE Book --- (validate the active index against the advertised format count)
+    // _nlbaf: u8,
+    nlbaf: u8,
+    // K1 MUSE Book ---
     /// FLBAS: formatted LBA size; bits[3:0] index into `lbaf[]` (byte 26).
     flbas: u8,
     /// RESERVED: bytes 27–127.
@@ -918,6 +1670,38 @@ struct IdentifyNamespaceData {
     /// so actual size = 2^LBADS bytes).
     lbaf: [u32; 16],
 }
+
+// K1 MUSE Book --- (shared initialization lifecycle regression)
+impl ControllerInit for InitContext {
+    fn reset(&mut self) -> Result<(), NvmeDeviceError> {
+        self.reset_controller()
+    }
+    fn configure_admin(&mut self) {
+        self.configure_admin_queue()
+    }
+    fn set_entry_size(&mut self) {
+        InitContext::set_entry_size(self)
+    }
+    fn enable(&mut self) -> Result<(), NvmeDeviceError> {
+        self.enable_controller()
+    }
+    fn identify_controller(&mut self) -> Result<(), NvmeDeviceError> {
+        InitContext::identify_controller(self)
+    }
+    fn identify_ns_list(&mut self) -> Result<Vec<u32>, NvmeDeviceError> {
+        InitContext::identify_ns_list(self)
+    }
+    fn identify_ns(&mut self, nsid: u32) -> Result<NvmeNamespace, NvmeDeviceError> {
+        InitContext::identify_ns(self, nsid)
+    }
+    fn create_io_queues(&mut self) -> Result<IoMsixVectors, NvmeDeviceError> {
+        InitContext::create_io_queues(self)
+    }
+    fn disable(&mut self) -> bool {
+        self.disable_controller()
+    }
+}
+// K1 MUSE Book ---
 
 fn bytes_to_cstr_string(bytes: &[u8]) -> String {
     if let Ok(cstr) = CStr::from_bytes_until_nul(bytes) {
@@ -1142,3 +1926,9 @@ mod test {
         bio_segments
     }
 }
+
+// K1 MUSE Book --- (real BIO and queue ownership regression)
+#[cfg(ktest)]
+#[path = "failure_test.rs"]
+mod failure_test;
+// K1 MUSE Book ---

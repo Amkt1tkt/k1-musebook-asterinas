@@ -2,10 +2,14 @@
 
 use alloc::{sync::Arc, vec::Vec};
 
-use ostd::mm::HasSize;
-
+// K1 MUSE Book --- (size() covers DMA-backed K1 FB; io_mem() is now Option)
+// use ostd::mm::HasSize;
+// K1 MUSE Book ---
 use crate::{
-    ansi_escape::{EraseInDisplay, EscapeFsm, EscapeOp},
+    // K1 MUSE Book --- (EL / CSI K for readline and getty)
+    // ansi_escape::{EraseInDisplay, EscapeFsm, EscapeOp},
+    ansi_escape::{EraseInDisplay, EraseInLine, EscapeFsm, EscapeOp},
+    // K1 MUSE Book ---
     font::BitmapFont,
     framebuffer::FrameBuffer,
     mode::ConsoleMode,
@@ -74,6 +78,17 @@ impl FramebufferConsole {
         self.state.set_font(font)
     }
 
+    // K1 MUSE Book --- (TIOCGWINSZ for the 1080p VT)
+    /// Returns `(rows, cols, width_px, height_px)` for TTY `TIOCGWINSZ`.
+    pub fn window_geometry(&self) -> (u16, u16, u16, u16) {
+        let cols = self.state.cols() as u16;
+        let rows = self.state.rows() as u16;
+        let width_px = self.state.backend.width() as u16;
+        let height_px = self.state.backend.height() as u16;
+        (rows, cols, width_px, height_px)
+    }
+    // K1 MUSE Book ---
+
     /// Sends a byte slice to the console.
     pub fn send(&mut self, buf: &[u8]) {
         for byte in buf {
@@ -89,6 +104,9 @@ impl FramebufferConsole {
 
             self.state.send_char(*byte);
         }
+        // K1 MUSE Book --- (coalesce eDP DMA writes per write() batch)
+        self.state.flush_dirty();
+        // K1 MUSE Book ---
     }
 }
 
@@ -111,26 +129,81 @@ struct ConsoleState {
 
     bytes: Vec<u8>,
     backend: Arc<FrameBuffer>,
+    // K1 MUSE Book --- (dirty bounding box; flushed once per send())
+    /// Inclusive-exclusive dirty rect in pixels: `(x0, y0, x1, y1)`.
+    dirty: Option<(usize, usize, usize, usize)>,
+    // K1 MUSE Book ---
 }
 
 impl ConsoleState {
+    // K1 MUSE Book --- (DMA-backed size, scaled glyphs, and deferred writes)
     fn new(backend: Arc<FrameBuffer>) -> Self {
-        let buffer_size = backend.io_mem().size();
+        // let buffer_size = backend.io_mem().size();
+        // Self {
+        //     x_pos: 0,
+        //     y_pos: 0,
+        //     fg_color: Pixel::WHITE,
+        //     bg_color: Pixel::BLACK,
+        //     font: BitmapFont::new_basic8x8(),
+        //     is_active: false,
+        //     mode: ConsoleMode::Text,
+        //     bytes: alloc::vec![0; buffer_size],
+        //     backend,
+        // }
+        let buffer_size = backend.size();
         Self {
             x_pos: 0,
             y_pos: 0,
             fg_color: Pixel::WHITE,
             bg_color: Pixel::BLACK,
-            font: BitmapFont::new_basic8x8(),
+            font: default_font_for_framebuffer(&backend),
             is_active: false,
             mode: ConsoleMode::Text,
             bytes: alloc::vec![0; buffer_size],
             backend,
+            dirty: None,
         }
     }
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (dirty-rect tracking for uncached eDP scanout)
+    fn mark_dirty(&mut self, x0: usize, y0: usize, x1: usize, y1: usize) {
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        self.dirty = Some(match self.dirty {
+            None => (x0, y0, x1, y1),
+            Some((ox0, oy0, ox1, oy1)) => (ox0.min(x0), oy0.min(y0), ox1.max(x1), oy1.max(y1)),
+        });
+    }
+
+    /// Flushes the dirty rect as per-row sub-spans.
+    fn flush_dirty(&mut self) {
+        let Some((x0, y0, x1, y1)) = self.dirty.take() else {
+            return;
+        };
+        if !self.is_output_enabled() {
+            return;
+        }
+        let pixel_size = self.backend.render_pixel(self.fg_color).nbytes();
+        let span = (x1 - x0) * pixel_size;
+        for y in y0..y1 {
+            let off = self.backend.calc_offset(x0, y).as_usize();
+            if off + span > self.bytes.len() {
+                break;
+            }
+            let _ = self
+                .backend
+                .write_bytes_at(off, &self.bytes[off..off + span]);
+        }
+    }
+    // K1 MUSE Book ---
 
     /// Flushes the entire console buffer to the framebuffer.
     fn flush_fullscreen(&mut self) {
+        // K1 MUSE Book --- (clear dirty before a full-screen flush)
+        self.dirty = None;
+        // K1 MUSE Book ---
         if self.is_output_enabled() {
             self.backend.write_bytes_at(0, &self.bytes).unwrap();
         }
@@ -149,7 +222,10 @@ impl ConsoleState {
             return;
         }
 
-        if self.x_pos > self.backend.width() - self.font.width() {
+        // K1 MUSE Book --- (wrap on the text-area width, not the raw panel)
+        // if self.x_pos > self.backend.width() - self.font.width() {
+        if self.x_pos + self.font.width() > self.text_width_px() {
+            // K1 MUSE Book ---
             self.newline();
         }
 
@@ -162,22 +238,61 @@ impl ConsoleState {
         self.y_pos += self.font.height();
         self.x_pos = 0;
 
-        if self.y_pos > self.backend.height() - self.font.height() {
+        // K1 MUSE Book --- (wrap on the text-area height, not the raw panel)
+        // if self.y_pos > self.backend.height() - self.font.height() {
+        if self.y_pos + self.font.height() > self.text_height_px() {
+            // K1 MUSE Book ---
             self.shift_lines_up();
         }
     }
 
     fn shift_lines_up(&mut self) {
+        // K1 MUSE Book --- (scroll only the text area; keep the overscan margin)
+        // let offset = self.backend.calc_offset(0, self.font.height()).as_usize();
+        // self.bytes.copy_within(offset.., 0);
+        // self.bytes[self.backend.io_mem().size() - offset..].fill(0);
+        //
+        // if self.is_output_enabled() {
+        //     self.backend.write_bytes_at(0, &self.bytes).unwrap();
+        // }
+        //
+        // self.y_pos -= self.font.height();
+        self.flush_dirty();
+
         let offset = self.backend.calc_offset(0, self.font.height()).as_usize();
-        self.bytes.copy_within(offset.., 0);
-        self.bytes[self.backend.io_mem().size() - offset..].fill(0);
+        let text_bytes = self.text_height_px() * self.backend.line_size();
+        if text_bytes > offset {
+            self.bytes.copy_within(offset..text_bytes, 0);
+            self.bytes[text_bytes - offset..text_bytes].fill(0);
+        }
 
         if self.is_output_enabled() {
-            self.backend.write_bytes_at(0, &self.bytes).unwrap();
+            self.backend
+                .write_bytes_at(0, &self.bytes[..text_bytes])
+                .unwrap();
         }
 
         self.y_pos -= self.font.height();
+        // K1 MUSE Book ---
     }
+
+    // K1 MUSE Book --- (cell geometry for TIOCGWINSZ and wrap)
+    fn cols(&self) -> usize {
+        self.backend.width() / self.font.width()
+    }
+
+    fn rows(&self) -> usize {
+        self.backend.height() / self.font.height()
+    }
+
+    fn text_width_px(&self) -> usize {
+        self.cols() * self.font.width()
+    }
+
+    fn text_height_px(&self) -> usize {
+        self.rows() * self.font.height()
+    }
+    // K1 MUSE Book ---
 
     fn carriage_return(&mut self) {
         self.x_pos = 0;
@@ -202,7 +317,10 @@ impl ConsoleState {
         let bg_pixel = self.backend.render_pixel(self.bg_color);
 
         let pixel_size = fg_pixel.nbytes();
-        let is_output_enabled = self.is_output_enabled();
+        // K1 MUSE Book --- (shadow only; FB updated in flush_dirty)
+        // let is_output_enabled = self.is_output_enabled();
+        let y0 = self.y_pos;
+        // K1 MUSE Book ---
 
         let mut offset = self.backend.calc_offset(self.x_pos, self.y_pos);
 
@@ -218,13 +336,23 @@ impl ConsoleState {
                 chunk.copy_from_slice(pixel.as_slice());
             }
 
-            // Write pixels to the framebuffer.
-            if is_output_enabled {
-                self.backend.write_bytes_at(off_st, render_buf).unwrap();
-            }
+            // K1 MUSE Book --- (do not write each glyph row; flush_dirty batches DMA)
+            // if is_output_enabled {
+            //     self.backend.write_bytes_at(off_st, render_buf).unwrap();
+            // }
+            // K1 MUSE Book ---
 
             offset.y_add(1);
         }
+
+        // K1 MUSE Book --- (record the glyph's dirty rect)
+        self.mark_dirty(
+            self.x_pos,
+            y0,
+            (self.x_pos + self.font.width()).min(self.backend.width()),
+            y0 + self.font.height(),
+        );
+        // K1 MUSE Book ---
     }
 
     /// Sets the font for the framebuffer console.
@@ -237,7 +365,10 @@ impl ConsoleState {
 
         self.font = font;
 
-        if self.y_pos > self.backend.height() - self.font.height() {
+        // K1 MUSE Book --- (wrap on the text-area height after a font change)
+        // if self.y_pos > self.backend.height() - self.font.height() {
+        if self.y_pos + self.font.height() > self.text_height_px() {
+            // K1 MUSE Book ---
             self.shift_lines_up();
         }
 
@@ -255,7 +386,9 @@ impl ConsoleState {
         let rendered_pixel = self.backend.render_pixel(color);
         let rendered_pixel_size = rendered_pixel.nbytes();
         let row_bytes = (x1 - x0) * rendered_pixel_size;
-        let is_output_enabled = self.is_output_enabled();
+        // K1 MUSE Book --- (defer FB write to flush_dirty)
+        // let is_output_enabled = self.is_output_enabled();
+        // K1 MUSE Book ---
 
         for y in y0..y1 {
             let off = self.backend.calc_offset(x0, y).as_usize();
@@ -266,25 +399,34 @@ impl ConsoleState {
                 chunk.copy_from_slice(rendered_pixel.as_slice());
             }
 
-            // Write pixels to the framebuffer.
-            if is_output_enabled {
-                self.backend.write_bytes_at(off, buf).unwrap();
-            }
+            // K1 MUSE Book --- (do not write each fill row; flush_dirty batches DMA)
+            // if is_output_enabled {
+            //     self.backend.write_bytes_at(off, buf).unwrap();
+            // }
+            // K1 MUSE Book ---
         }
+        // K1 MUSE Book --- (record the filled rect as dirty)
+        self.mark_dirty(x0, y0, x1, y1);
+        // K1 MUSE Book ---
     }
 
     /// Calculates the pixel coordinates for the cursor cell.
     fn cursor_cell_rect(&self) -> (usize, usize, usize, usize) {
         let cx0 = self.x_pos;
-        let cx1 = cx0 + self.font.width();
-        // `min` is necessary if we are at the end of the line.
-        let cx1 = cx1.min(self.backend.width());
+        // K1 MUSE Book --- (clip to the text area, not the raw panel)
+        // let cx1 = cx0 + self.font.width();
+        // let cx1 = cx1.min(self.backend.width());
+        let cx1 = (cx0 + self.font.width()).min(self.text_width_px());
+        // K1 MUSE Book ---
 
         let cy0 = self.y_pos;
         let cy1 = cy0 + self.font.height();
         // This will always hold because we will scroll if it is no longer true after a new line or
         // font change.
-        debug_assert!(cy1 <= self.backend.height());
+        // K1 MUSE Book --- (assert against the text area, not the raw panel)
+        // debug_assert!(cy1 <= self.backend.height());
+        debug_assert!(cy1 <= self.text_height_px());
+        // K1 MUSE Book ---
 
         (cx0, cy0, cx1, cy1)
     }
@@ -295,10 +437,26 @@ impl ConsoleState {
     }
 }
 
+// K1 MUSE Book --- (scale console glyphs to the panel resolution)
+/// Picks a readable default glyph size for the panel resolution.
+fn default_font_for_framebuffer(fb: &FrameBuffer) -> BitmapFont {
+    let scale = match fb.height() {
+        0..720 => 1,
+        720..1440 => 2, // 1080p → 16×16, ~120×67
+        _ => 3,
+    };
+    BitmapFont::new_basic8x8_scaled(scale)
+}
+// K1 MUSE Book ---
+
 impl EscapeOp for ConsoleState {
     fn set_cursor(&mut self, x: usize, y: usize) {
-        let max_x = self.backend.width() / self.font.width() - 1;
-        let max_y = self.backend.height() / self.font.height() - 1;
+        // K1 MUSE Book --- (cursor limits use cell geometry, not raw pixels)
+        // let max_x = self.backend.width() / self.font.width() - 1;
+        // let max_y = self.backend.height() / self.font.height() - 1;
+        let max_x = self.cols().saturating_sub(1);
+        let max_y = self.rows().saturating_sub(1);
+        // K1 MUSE Book ---
 
         // Note that if the Y (or X) position is too large, the cursor will move to the last line
         // (or the line end).
@@ -316,8 +474,12 @@ impl EscapeOp for ConsoleState {
 
     fn erase_in_display(&mut self, mode: EraseInDisplay) {
         let bg = self.bg_color;
-        let w = self.backend.width();
-        let h = self.backend.height();
+        // K1 MUSE Book --- (clear the text area, not the overscan)
+        // let w = self.backend.width();
+        // let h = self.backend.height();
+        let w = self.text_width_px();
+        let h = self.text_height_px();
+        // K1 MUSE Book ---
 
         let (cx0, cy0, cx1, cy1) = self.cursor_cell_rect();
 
@@ -341,9 +503,23 @@ impl EscapeOp for ConsoleState {
                 self.fill_rect_pixels(0, cy0, cx1, cy1, bg);
             }
             EraseInDisplay::EntireScreen | EraseInDisplay::EntireScreenAndScrollback => {
-                // Clear the entire screen.
+                // Clear the entire text area.
                 self.fill_rect_pixels(0, 0, w, h, bg);
             }
         }
     }
+
+    // K1 MUSE Book --- (CSI n K; readline/bash)
+    fn erase_in_line(&mut self, mode: EraseInLine) {
+        let bg = self.bg_color;
+        let w = self.text_width_px();
+        let (cx0, cy0, cx1, cy1) = self.cursor_cell_rect();
+
+        match mode {
+            EraseInLine::CursorToEnd => self.fill_rect_pixels(cx0, cy0, w, cy1, bg),
+            EraseInLine::CursorToBeginning => self.fill_rect_pixels(0, cy0, cx1, cy1, bg),
+            EraseInLine::EntireLine => self.fill_rect_pixels(0, cy0, w, cy1, bg),
+        }
+    }
+    // K1 MUSE Book ---
 }

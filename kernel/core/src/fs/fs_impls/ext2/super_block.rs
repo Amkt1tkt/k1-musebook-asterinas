@@ -604,10 +604,27 @@ impl SuperBlock {
         sb_bid + (SUPER_BLOCK_SIZE.div_ceil(self.block_size) as u32)
     }
 
-    #[expect(dead_code)]
-    const fn state(&self) -> FsState {
+    // K1 MUSE Book --- (clean/dirty s_state protocol for e2fsck -p)
+    // #[expect(dead_code)]
+    // const fn state(&self) -> FsState {
+    //     self.state
+    // }
+    /// Returns the on-disk file system state (`s_state`).
+    pub(super) const fn state(&self) -> FsState {
         self.state
     }
+
+    /// Overwrites the on-disk file system state (`s_state`).
+    pub(super) const fn set_state(&mut self, state: FsState) {
+        self.state = state;
+    }
+
+    /// Records a mount: bumps the mount count and the mount time.
+    pub(super) const fn record_mount(&mut self, now: Duration) {
+        self.mnt_count = self.mnt_count.wrapping_add(1);
+        self.mtime = now;
+    }
+    // K1 MUSE Book ---
 
     #[expect(dead_code)]
     const fn rev_level(&self) -> RevLevel {

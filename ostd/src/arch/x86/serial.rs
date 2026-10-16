@@ -2,6 +2,10 @@
 
 //! The console I/O.
 
+// K1 MUSE Book --- (share serial formatting with the reentrant console path)
+use core::fmt::{self, Write};
+
+// K1 MUSE Book ---
 use spin::Once;
 use x86_64::instructions::port::ReadWriteAccess;
 
@@ -132,3 +136,40 @@ pub(crate) unsafe fn init(early_cmdline: &EarlyCmdline) {
     SERIAL_PORT.call_once(|| SpinLock::new(serial));
 }
 reserve_io_port_range!(0x3F8..0x400);
+
+// K1 MUSE Book --- (re-entrant raw write when SERIAL_PORT is already held)
+/// Writes without taking [`SERIAL_PORT`].
+///
+/// Only used when this CPU already holds that lock — a nested `early_print`
+/// or a panic during `write_fmt`.
+pub(crate) fn write_fmt_raw(args: fmt::Arguments) {
+    let _ = RawCom1.write_fmt(args);
+}
+
+struct RawCom1;
+
+impl Write for RawCom1 {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for &b in s.as_bytes() {
+            if b == b'\n' {
+                write_com1(b'\r');
+            }
+            write_com1(b);
+        }
+        Ok(())
+    }
+}
+
+fn write_com1(byte: u8) {
+    // SAFETY: COM1 data (0x3F8) and line status (0x3FD). Caller already
+    // owns these ports via `SERIAL_PORT` (see [`write_fmt_raw`]).
+    unsafe {
+        let lsr = IoPort::<u8, ReadWriteAccess>::new(0x3FD);
+        let data = IoPort::<u8, ReadWriteAccess>::new(0x3F8);
+        while lsr.read() & (1 << 5) == 0 {
+            core::hint::spin_loop();
+        }
+        data.write(byte);
+    }
+}
+// K1 MUSE Book ---

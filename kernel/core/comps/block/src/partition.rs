@@ -312,6 +312,20 @@ impl PartitionManager {
         }
     }
 
+    // K1 MUSE Book --- (remove partition devices when a removable disk disconnects)
+    /// Unregisters all partitions managed by this disk.
+    ///
+    /// Uses the same partition-manager -> registry lock order as `update`.
+    pub fn clear(&self) {
+        let mut partitions = self.inner.lock();
+        if let Some(old_partitions) = partitions.take() {
+            for partition in old_partitions {
+                let _ = unregister(partition.id());
+            }
+        }
+    }
+    // K1 MUSE Book ---
+
     /// Replaces the managed partitions with the parsed partition information.
     pub(super) fn update(&self, device: &Arc<dyn BlockDevice>, infos: Vec<Option<PartitionInfo>>) {
         // Lock order: partition lock -> `DEVICE_REGISTRY`

@@ -453,6 +453,20 @@ pub(crate) struct CWinSize {
     ws_ypixel: u16,
 }
 
+// K1 MUSE Book --- (1080p VT publishes real cell geometry via TIOCGWINSZ)
+impl CWinSize {
+    /// Creates a window size from character cells and optional pixel geometry.
+    pub(crate) fn new(ws_row: u16, ws_col: u16, ws_xpixel: u16, ws_ypixel: u16) -> Self {
+        Self {
+            ws_row,
+            ws_col,
+            ws_xpixel,
+            ws_ypixel,
+        }
+    }
+}
+// K1 MUSE Book ---
+
 /// A font operation; `struct console_font_op` in Linux.
 ///
 /// Reference: <https://elixir.bootlin.com/linux/v6.15/source/include/uapi/linux/kd.h#L159>.

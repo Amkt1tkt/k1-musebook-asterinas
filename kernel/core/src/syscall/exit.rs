@@ -14,6 +14,9 @@ pub(super) fn sys_exit(
     user_ctx: &mut UserContext,
 ) -> Result<SyscallReturn> {
     debug!("exid code = {}", exit_code);
+    // K1 MUSE Book --- (k1.diag=proc / k1.diag=stderr: non-zero exit + flush tee)
+    super::proc_diag::note_exit(ctx, "exit", exit_code);
+    // K1 MUSE Book ---
 
     let term_status = TermStatus::Exited(exit_code as _);
     do_exit(term_status, ctx, user_ctx);

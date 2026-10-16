@@ -37,6 +37,9 @@ mod chmod;
 mod chown;
 mod chroot;
 mod clock_gettime;
+// K1 MUSE Book --- (date -s / hwclock --hctosys)
+mod clock_settime;
+// K1 MUSE Book ---
 mod clone;
 mod close;
 mod connect;
@@ -116,6 +119,9 @@ mod prctl;
 mod pread64;
 mod preadv;
 mod prlimit64;
+// K1 MUSE Book --- (k1.diag=proc / k1.diag=stderr process and stderr console tee)
+mod proc_diag;
+// K1 MUSE Book ---
 mod pselect6;
 mod ptrace;
 mod pwrite64;
@@ -171,6 +177,9 @@ mod setresuid;
 mod setreuid;
 mod setsid;
 mod setsockopt;
+// K1 MUSE Book --- (BusyBox date -s)
+mod settimeofday;
+// K1 MUSE Book ---
 mod setuid;
 mod setxattr;
 mod shutdown;
@@ -341,6 +350,9 @@ macro_rules! impl_syscall_nums_and_dispatch_fn {
                 )*
                 _ => {
                     ostd::warn!("Unimplemented syscall number: {}", syscall_number);
+                    // K1 MUSE Book --- (k1.diag=proc: name the ENOSYS caller; no line budget)
+                    $crate::syscall::proc_diag::note_enosys(syscall_number, ctx);
+                    // K1 MUSE Book ---
                     $crate::return_errno_with_message!(
                         $crate::error::Errno::ENOSYS,
                         "Syscall was unimplemented"

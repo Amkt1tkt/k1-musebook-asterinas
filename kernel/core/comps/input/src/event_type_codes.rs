@@ -360,10 +360,21 @@ pub enum KeyCode {
     BtnExtra = 0x114,   // Mouse extra button
     BtnForward = 0x115, // Mouse forward button
     BtnBack = 0x116,    // Mouse back button
+    // K1 MUSE Book --- (digitizer / touchpad tool codes for I2C-HID MT-B)
+    BtnToolFinger = 0x145,
+    BtnToolQuintTap = 0x148,
+    BtnTouch = 0x14a,
+    BtnToolDoubleTap = 0x14d,
+    BtnToolTripleTap = 0x14e,
+    BtnToolQuadTap = 0x14f,
+    // K1 MUSE Book ---
 }
 
 /// The maximum value for key codes.
-const KEY_MAX: usize = 0x120;
+// K1 MUSE Book --- (must cover BtnToolQuadTap 0x14f; Linux KEY_MAX is 0x2ff)
+// const KEY_MAX: usize = 0x120;
+const KEY_MAX: usize = 0x2ff;
+// K1 MUSE Book ---
 /// The number of key codes.
 const KEY_COUNT: usize = KEY_MAX + 1;
 
@@ -372,3 +383,173 @@ pub enum KeyStatus {
     Released,
     Pressed,
 }
+
+// K1 MUSE Book --- (EV_ABS / EV_SW / INPUT_PROP_* for the K1 touchpad, lid, power key)
+
+/// Absolute axes. Values match `include/uapi/linux/input-event-codes.h`.
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AbsCode {
+    X = 0x00,
+    Y = 0x01,
+    MtSlot = 0x2f,
+    MtPositionX = 0x35,
+    MtPositionY = 0x36,
+    MtTrackingId = 0x39,
+}
+
+/// Highest absolute axis code (`ABS_MAX`).
+pub const ABS_MAX: usize = 0x3f;
+const ABS_COUNT: usize = ABS_MAX + 1;
+
+/// Per-axis limits for `EVIOCGABS` (`struct input_absinfo`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod)]
+pub struct AbsInfo {
+    pub value: i32,
+    pub minimum: i32,
+    pub maximum: i32,
+    pub fuzz: i32,
+    pub flat: i32,
+    pub resolution: i32,
+}
+
+impl AbsInfo {
+    /// Range-only info; current `value` stays 0 until a report updates it.
+    pub const fn range(minimum: i32, maximum: i32) -> Self {
+        Self {
+            value: 0,
+            minimum,
+            maximum,
+            fuzz: 0,
+            flat: 0,
+            resolution: 0,
+        }
+    }
+}
+
+/// A set of [`AbsCode`] represented as a bitmap.
+#[derive(Clone, Debug)]
+pub struct AbsCodeSet(BitVec<u8>);
+
+impl Default for AbsCodeSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AbsCodeSet {
+    /// Creates an empty set.
+    pub fn new() -> Self {
+        Self(BitVec::repeat(false, ABS_COUNT))
+    }
+
+    /// Sets an absolute axis in the set.
+    pub fn set(&mut self, abs_code: AbsCode) {
+        self.0.set(abs_code as usize, true);
+    }
+
+    /// Checks if the set contains an absolute axis.
+    pub fn contain(&self, abs_code: AbsCode) -> bool {
+        self.0.get(abs_code as usize).map(|b| *b).unwrap()
+    }
+
+    /// Returns the bitmap as a byte slice.
+    pub fn as_raw_slice(&self) -> &[u8] {
+        self.0.as_raw_slice()
+    }
+}
+
+/// Switch events (`EV_SW`).
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SwCode {
+    /// Set = lid shut. Linux `SW_LID`.
+    Lid = 0x00,
+}
+
+/// Highest switch code (`SW_MAX`).
+pub const SW_MAX: usize = 0x10;
+const SW_COUNT: usize = SW_MAX + 1;
+
+/// A set of [`SwCode`] represented as a bitmap.
+#[derive(Clone, Debug)]
+pub struct SwCodeSet(BitVec<u8>);
+
+impl Default for SwCodeSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SwCodeSet {
+    /// Creates an empty set.
+    pub fn new() -> Self {
+        Self(BitVec::repeat(false, SW_COUNT))
+    }
+
+    /// Sets a switch code in the set.
+    pub fn set(&mut self, sw_code: SwCode) {
+        self.0.set(sw_code as usize, true);
+    }
+
+    /// Checks if the set contains a switch code.
+    pub fn contain(&self, sw_code: SwCode) -> bool {
+        self.0.get(sw_code as usize).map(|b| *b).unwrap()
+    }
+
+    /// Returns the bitmap as a byte slice.
+    pub fn as_raw_slice(&self) -> &[u8] {
+        self.0.as_raw_slice()
+    }
+}
+
+/// Input device properties (`INPUT_PROP_*`).
+#[repr(u16)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InputProp {
+    /// Needs a pointer. Distinguishes a touchpad from a touchscreen.
+    Pointer = 0x00,
+    /// Direct input (touchscreen).
+    Direct = 0x01,
+    /// Buttons under the pad (clickpad).
+    ButtonPad = 0x02,
+}
+
+/// Highest input property code (`INPUT_PROP_MAX`).
+pub const INPUT_PROP_MAX: usize = 0x1f;
+const INPUT_PROP_COUNT: usize = INPUT_PROP_MAX + 1;
+
+/// A set of [`InputProp`] represented as a bitmap.
+#[derive(Clone, Debug)]
+pub struct InputPropSet(BitVec<u8>);
+
+impl Default for InputPropSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InputPropSet {
+    /// Creates an empty set.
+    pub fn new() -> Self {
+        Self(BitVec::repeat(false, INPUT_PROP_COUNT))
+    }
+
+    /// Sets a property in the set.
+    pub fn set(&mut self, prop: InputProp) {
+        self.0.set(prop as usize, true);
+    }
+
+    /// Checks if the set contains a property.
+    pub fn contain(&self, prop: InputProp) -> bool {
+        self.0.get(prop as usize).map(|b| *b).unwrap()
+    }
+
+    /// Returns the bitmap as a byte slice.
+    pub fn as_raw_slice(&self) -> &[u8] {
+        self.0.as_raw_slice()
+    }
+}
+
+// K1 MUSE Book ---

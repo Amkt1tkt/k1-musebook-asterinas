@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: keep shell scripts usable across Windows and Linux checkouts.
+# Binary assets must not undergo line-ending conversion.
+* text=auto eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.bin  binary
+*.img  binary
+*.gz   binary
+*.xz   binary
+*.zip  binary
+*.ttf  binary
+*.woff binary
+*.pdf  binary
+*.fw   binary
+
+# Unified diffs prefix context with a space, including empty and tab-indented lines.
+*.patch whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

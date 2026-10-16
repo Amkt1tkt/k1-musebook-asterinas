@@ -355,6 +355,13 @@ pub enum MappableObject<'a> {
 
 /// A trait that describes memory mapping behavior for special files (in `mmap`).
 pub trait Mappable {
+    // K1 MUSE Book --- (only demand-paged RAM devices implement private COW)
+    /// Whether this device supports private, copy-on-write mappings.
+    fn supports_private_mapping(&self) -> bool {
+        false
+    }
+    // K1 MUSE Book ---
+
     /// Fills the memory region to map with `handle`.
     ///
     /// `offset` specifies the file offset, which must be page-aligned.
@@ -367,6 +374,13 @@ pub trait Mappable {
 
 /// A trait that describes memory mapping behavior for special files (after `mmap`).
 pub trait MappedObject: Send + Sync + Debug {
+    // K1 MUSE Book --- (mprotect must preserve COW and device write notifications)
+    /// Whether writable permissions must be installed by the fault handler.
+    fn needs_write_faults(&self) -> bool {
+        false
+    }
+    // K1 MUSE Book ---
+
     /// Duplicates the memory mapping at the specific offset.
     ///
     /// `offset` specifies the memory address offset within the mapping, which must be smaller than

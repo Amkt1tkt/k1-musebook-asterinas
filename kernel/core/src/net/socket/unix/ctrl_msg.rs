@@ -58,12 +58,20 @@ impl UnixControlMessage {
         }
     }
 
-    pub(crate) fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
+    // K1 MUSE Book --- (MSG_CMSG_CLOEXEC: `fd_flags` applies to installed SCM_RIGHTS fds)
+    //     pub(crate) fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
+    //             Message::Files(msg) => msg.write_to(writer),
+    pub(crate) fn write_to(
+        &self,
+        writer: &mut VmWriter,
+        fd_flags: FdFlags,
+    ) -> Result<(CControlHeader, RecvFlags)> {
         match &self.0 {
-            Message::Files(msg) => msg.write_to(writer),
+            Message::Files(msg) => msg.write_to(writer, fd_flags),
             Message::Cred(msg) => msg.write_to(writer),
         }
     }
+    // K1 MUSE Book ---
 }
 
 struct FileMessage {
@@ -113,7 +121,13 @@ impl FileMessage {
         Ok(FileMessage { files })
     }
 
-    fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
+    // K1 MUSE Book --- (MSG_CMSG_CLOEXEC)
+    fn write_to(
+        &self,
+        writer: &mut VmWriter,
+        fd_flags: FdFlags,
+    ) -> Result<(CControlHeader, RecvFlags)> {
+        // K1 MUSE Book ---
         let nfiles = self
             .files
             .len()
@@ -137,11 +151,13 @@ impl FileMessage {
         let current = Task::current().unwrap();
         let file_table = current.as_thread_local().unwrap().borrow_file_table();
         for file in self.files[..nfiles].iter() {
-            // TODO: Deal with the `O_CLOEXEC` flag.
-            let fd = file_table
-                .unwrap()
-                .write()
-                .insert(file.clone(), FdFlags::empty());
+            // K1 MUSE Book --- (MSG_CMSG_CLOEXEC selects `FdFlags::CLOEXEC` here)
+            //             let fd = file_table
+            //                 .unwrap()
+            //                 .write()
+            //                 .insert(file.clone(), FdFlags::empty());
+            let fd = file_table.unwrap().write().insert(file.clone(), fd_flags);
+            // K1 MUSE Book ---
             // Perhaps we should remove the inserted files from the file table if we cannot write
             // the file descriptor back to user space? However, even Linux cannot handle every
             // corner case (https://elixir.bootlin.com/linux/v6.15.2/source/net/core/scm.c#L357).

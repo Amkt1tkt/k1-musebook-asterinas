@@ -718,8 +718,14 @@ impl dyn Inode {
         (self as &dyn Any).downcast_ref::<T>()
     }
 
-    #[cfg_attr(not(ktest), expect(dead_code))]
+    // K1 MUSE Book --- (ktests and the riscv64 PVR firmware loader use this accessor)
+    // #[cfg_attr(not(ktest), expect(dead_code))]
+    #[cfg_attr(
+        not(any(all(target_arch = "riscv64", feature = "pvr"), ktest)),
+        expect(dead_code)
+    )]
     pub(crate) fn read_bytes_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
+        // K1 MUSE Book ---
         let mut writer = VmWriter::from(buf).to_fallible();
         self.read_at(offset, &mut writer, StatusFlags::empty())
     }

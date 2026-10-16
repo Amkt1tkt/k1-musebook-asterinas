@@ -51,6 +51,17 @@ boot.method = "vmm-direct"
 build.strip_elf = false
 qemu.args = "$(./tools/qemu_args.sh riscv)"
 
+# K1 MUSE Book --- (RustSBI enters the board image at physical 0x200000)
+# Keep the generic RISC-V template at QEMU's address. OSDK places these flags
+# before -T, so the template's default can be overridden before LOAD layout.
+# vmm-direct selects the ELF build later converted to the board's flat image.
+[scheme."k1"]
+supported_archs = ["riscv64"]
+boot.method = "vmm-direct"
+build.strip_elf = false
+build.rustflags = "-C link-arg=--defsym=KERNEL_LMA=0x200000"
+# K1 MUSE Book ---
+
 [scheme."sifive_u"]
 supported_archs = ["riscv64"]
 build.features = ["riscv_sv39_mode"]

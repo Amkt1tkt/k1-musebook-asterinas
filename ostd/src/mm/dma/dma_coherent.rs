@@ -1,20 +1,29 @@
 // SPDX-License-Identifier: MPL-2.0
 
+// K1 MUSE Book --- (retain the actual CPU cache policy and owner for safe DMA aliases)
+use alloc::sync::Arc;
+// K1 MUSE Book ---
 use core::{fmt::Debug, mem::ManuallyDrop};
 
+// K1 MUSE Book --- (retain the actual CPU cache policy and owner for safe DMA aliases)
+//     alloc_kva, cvm_need_private_protection, prepare_dma, split_daddr, unprepare_dma,
 use super::util::{
-    alloc_kva, cvm_need_private_protection, prepare_dma, split_daddr, unprepare_dma,
+    alloc_kva, cvm_need_private_protection, kva_cache_policy, prepare_dma, split_daddr,
+    unprepare_dma,
 };
 use crate::{
     arch::irq,
     error::Error,
+    io::IoMem,
     mm::{
         Daddr, FrameAllocOptions, HasDaddr, HasPaddr, HasPaddrRange, HasSize, Infallible,
         PAGE_SIZE, Paddr, Segment, Split, VmReader, VmWriter,
         io::util::{HasVmReaderWriter, VmReaderWriterIdentity},
         kspace::kvirt_area::KVirtArea,
+        page_prop::CachePolicy,
     },
 };
+// K1 MUSE Book ---
 
 /// A DMA memory object that can be accessed in a cache-coherent manner.
 ///
@@ -30,6 +39,9 @@ pub struct DmaCoherent {
     inner: Inner,
     map_daddr: Option<Daddr>,
     is_cache_coherent: bool,
+    // K1 MUSE Book --- (aliases must retain the allocation's actual CPU cache policy)
+    cpu_cache_policy: CachePolicy,
+    // K1 MUSE Book ---
 }
 
 #[derive(Debug)]
@@ -68,17 +80,33 @@ impl DmaCoherent {
 
         let cvm = cvm_need_private_protection();
 
-        let (inner, paddr_range) = if is_cache_coherent && !cvm {
+        // K1 MUSE Book --- (capture policy when the backing is constructed)
+        // let (inner, paddr_range) = if is_cache_coherent && !cvm {
+        let (inner, paddr_range, cpu_cache_policy) = if is_cache_coherent && !cvm {
+            // K1 MUSE Book ---
             let segment = FrameAllocOptions::new()
                 .zeroed(false)
+                // K1 MUSE Book --- (coherent DMA must come from the 32-bit-reachable bank)
+                .dma_capable(true)
+                // K1 MUSE Book ---
                 .alloc_segment(nframes)?;
             let paddr_range = segment.paddr_range();
 
-            (Inner::Segment(segment), paddr_range)
+            // K1 MUSE Book --- (the linear RAM mapping is write-back)
+            // (Inner::Segment(segment), paddr_range)
+            (Inner::Segment(segment), paddr_range, CachePolicy::Writeback)
+            // K1 MUSE Book ---
         } else {
             let (kva, paddr) = alloc_kva(nframes, is_cache_coherent)?;
 
-            (Inner::Kva(kva, paddr), paddr..paddr + nframes * PAGE_SIZE)
+            // K1 MUSE Book --- (share the exact policy selector with alloc_kva)
+            // (Inner::Kva(kva, paddr), paddr..paddr + nframes * PAGE_SIZE)
+            (
+                Inner::Kva(kva, paddr),
+                paddr..paddr + nframes * PAGE_SIZE,
+                kva_cache_policy(is_cache_coherent),
+            )
+            // K1 MUSE Book ---
         };
 
         // SAFETY: The physical address range is untyped DMA memory before `drop`.
@@ -88,8 +116,25 @@ impl DmaCoherent {
             inner,
             map_daddr,
             is_cache_coherent,
+            // K1 MUSE Book --- (persist the constructor's policy through aliases)
+            cpu_cache_policy,
+            // K1 MUSE Book ---
         })
     }
+
+    // K1 MUSE Book --- (owned framebuffer aliases cannot outlive their DMA pages)
+    /// Creates an alias that owns a reference to this DMA allocation.
+    ///
+    /// Every clone, slice and userspace mapping keeps the backing alive. The
+    /// CPU cache policy is fixed to the policy selected at allocation time.
+    pub fn as_iomem_alias(self: &Arc<Self>) -> IoMem {
+        IoMem::new_dma(self.clone())
+    }
+
+    pub(crate) fn cpu_cache_policy(&self) -> CachePolicy {
+        self.cpu_cache_policy
+    }
+    // K1 MUSE Book ---
 }
 
 impl Split for DmaCoherent {
@@ -97,13 +142,19 @@ impl Split for DmaCoherent {
         assert!(offset.is_multiple_of(PAGE_SIZE));
         assert!(0 < offset && offset < self.size());
 
-        let (inner, map_daddr, is_cache_coherent) = {
+        // K1 MUSE Book --- (split pieces retain the same CPU mapping policy)
+        // let (inner, map_daddr, is_cache_coherent) = {
+        let (inner, map_daddr, is_cache_coherent, cpu_cache_policy) = {
+            // K1 MUSE Book ---
             let this = ManuallyDrop::new(self);
             (
                 // SAFETY: `this.inner` will never be used or dropped later.
                 unsafe { core::ptr::read(&this.inner as *const Inner) },
                 this.map_daddr,
                 this.is_cache_coherent,
+                // K1 MUSE Book --- (the backing cache policy does not change on split)
+                this.cpu_cache_policy,
+                // K1 MUSE Book ---
             )
         };
 
@@ -126,11 +177,17 @@ impl Split for DmaCoherent {
                 inner: inner1,
                 map_daddr: daddr1,
                 is_cache_coherent,
+                // K1 MUSE Book --- (same allocation, same cache attributes)
+                cpu_cache_policy,
+                // K1 MUSE Book ---
             },
             Self {
                 inner: inner2,
                 map_daddr: daddr2,
                 is_cache_coherent,
+                // K1 MUSE Book --- (same allocation, same cache attributes)
+                cpu_cache_policy,
+                // K1 MUSE Book ---
             },
         )
     }

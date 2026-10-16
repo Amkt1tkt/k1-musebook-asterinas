@@ -7,7 +7,10 @@ use core::{
 };
 
 use aster_input::{
-    event_type_codes::{EventTypes, SynEvent},
+    // K1 MUSE Book --- (EVIOCGABS / EVIOCGPROP need AbsCode / AbsInfo)
+    event_type_codes::{AbsCode, AbsInfo, EventTypes, SynEvent},
+    // event_type_codes::{EventTypes, SynEvent},
+    // K1 MUSE Book ---
     input_dev::InputEvent,
 };
 use atomic_integer_wrapper::define_atomic_version_of_integer_like_type;
@@ -49,10 +52,16 @@ mod ioctl_defs {
     pub(super) type GetKeyState   = ioc!(EVIOCGKEY,     b'E', 0x18, OutData<[u8]>);
     pub(super) type GetLedState   = ioc!(EVIOCGLED,     b'E', 0x19, OutData<[u8]>);
     pub(super) type GetSwState    = ioc!(EVIOCGSW,      b'E', 0x1B, OutData<[u8]>);
+    // K1 MUSE Book --- (EVIOCGPROP / EVIOCGABS for libinput touchpad recognition)
+    pub(super) type GetProp       = ioc!(EVIOCGPROP,    b'E', 0x09, OutData<[u8]>);
+    // K1 MUSE Book ---
     pub(super) type SetClockId    = ioc!(EVIOCSCLOCKID, b'E', 0xA0, InData<i32>);
 
     /// The `EVIOCGBIT` ioctl enum.
     pub(super) type GetEventBits = IoctlEnum<b'E', 0x20, 0x1F, OutData<[u8]>>;
+    // K1 MUSE Book --- (`EVIOCGABS(abs)` — `_IOR('E', 0x40 + abs, struct input_absinfo)`)
+    pub(super) type GetAbsInfo = IoctlEnum<b'E', 0x40, 0x3F, OutData<[u8]>>;
+    // K1 MUSE Book ---
 }
 
 // Reference: <https://elixir.bootlin.com/linux/v6.17.9/source/include/uapi/linux/input.h#L28>
@@ -316,6 +325,37 @@ fn write_bytes_and_zeros_to_userspace(writer: &mut VmWriter, bytes: &[u8]) -> Re
     Ok(())
 }
 
+// K1 MUSE Book --- (Linux EVIOCGABS permits partial input_absinfo copies)
+/// Reads a supported or zero-filled absolute axis on an absolute-input device.
+/// Devices without absolute axes reject the operation, matching Linux evdev.
+fn absinfo_for_ioctl(
+    capability: &aster_input::input_dev::InputCapability,
+    nr: u8,
+) -> Result<AbsInfo> {
+    if !capability.support_event_type(EventTypes::ABS) {
+        return_errno_with_message!(Errno::EINVAL, "the input device has no absolute axes");
+    }
+    let axis = match nr {
+        0x00 => AbsCode::X,
+        0x01 => AbsCode::Y,
+        0x2f => AbsCode::MtSlot,
+        0x35 => AbsCode::MtPositionX,
+        0x36 => AbsCode::MtPositionY,
+        0x39 => AbsCode::MtTrackingId,
+        _ => return Ok(AbsInfo::default()),
+    };
+    Ok(capability.absinfo(axis).unwrap_or_default())
+}
+
+/// Copies at most the supplied ioctl size, leaving oversized buffers untouched.
+fn write_absinfo(writer: &mut VmWriter, info: &AbsInfo) -> Result<()> {
+    let bytes = info.as_bytes();
+    let len = writer.avail().min(bytes.len());
+    writer.write_fallible(&mut VmReader::from(&bytes[..len]))?;
+    Ok(())
+}
+// K1 MUSE Book ---
+
 fn handle_get_bit(evdev: &Arc<EvdevDevice>, event_type: u8, writer: &mut VmWriter) -> Result<()> {
     let capability = evdev.device.capability();
 
@@ -332,9 +372,19 @@ fn handle_get_bit(evdev: &Arc<EvdevDevice>, event_type: u8, writer: &mut VmWrite
             let bitmap = capability.supported_relative_axes_bitmap();
             write_bytes_and_zeros_to_userspace(writer, bitmap)?;
         }
-        t if t == EventTypes::ABS.as_index()
-            || t == EventTypes::LED.as_index()
-            || t == EventTypes::SW.as_index()
+        // K1 MUSE Book --- (real ABS / SW bitmaps; LED/MSC/FF/SND stay zeroed)
+        t if t == EventTypes::ABS.as_index() => {
+            let bitmap = capability.supported_absolute_axes_bitmap();
+            write_bytes_and_zeros_to_userspace(writer, bitmap)?;
+        }
+        t if t == EventTypes::SW.as_index() => {
+            let bitmap = capability.supported_switches_bitmap();
+            write_bytes_and_zeros_to_userspace(writer, bitmap)?;
+        }
+        // t if t == EventTypes::ABS.as_index()
+        //     || t == EventTypes::LED.as_index()
+        //     || t == EventTypes::SW.as_index()
+        t if t == EventTypes::LED.as_index()
             || t == EventTypes::MSC.as_index()
             || t == EventTypes::FF.as_index()
             || t == EventTypes::SND.as_index() =>
@@ -345,6 +395,7 @@ fn handle_get_bit(evdev: &Arc<EvdevDevice>, event_type: u8, writer: &mut VmWrite
             // <https://cgit.freedesktop.org/libevdev/tree/libevdev/libevdev.c?h=libevdev-1.13.6#n459>.
             writer.fill_zeros(writer.avail())?;
         }
+        // K1 MUSE Book ---
         _ => {
             return_errno_with_message!(Errno::EINVAL, "the event type is not supported yet");
         }
@@ -418,6 +469,7 @@ impl PerOpenFileOps for EvdevFile {
         false
     }
 
+    // K1 MUSE Book --- (provide the event-device ioctls required by libinput)
     fn ioctl(&self, _path: &Path, raw_ioctl: RawIoctl) -> Result<i32> {
         use ioctl_defs::*;
 
@@ -481,12 +533,38 @@ impl PerOpenFileOps for EvdevFile {
                 })?;
             }
             cmd @ GetSwState => {
-                // No switch events are supported. So we can report zeros as switch states here.
+                // K1 MUSE Book --- (live EV_SW bits, e.g. SW_LID)
+                // // No switch events are supported. So we can report zeros as switch states here.
+                // cmd.with_writer(|mut writer| {
+                //     writer.fill_zeros(writer.avail())?;
+                //     Ok(())
+                // })?;
+                let evdev = self.upgrade_device()?;
                 cmd.with_writer(|mut writer| {
-                    writer.fill_zeros(writer.avail())?;
-                    Ok(())
+                    write_bytes_and_zeros_to_userspace(
+                        &mut writer,
+                        &evdev.device.switch_state_bits(),
+                    )
+                })?;
+                // K1 MUSE Book ---
+            }
+            // K1 MUSE Book --- (EVIOCGPROP / EVIOCGABS)
+            cmd @ GetProp => {
+                let evdev = self.upgrade_device()?;
+                cmd.with_writer(|mut writer| {
+                    write_bytes_and_zeros_to_userspace(
+                        &mut writer,
+                        evdev.device.capability().properties_bitmap(),
+                    )
                 })?;
             }
+            cmd @ GetAbsInfo => {
+                let evdev = self.upgrade_device()?;
+                let info = absinfo_for_ioctl(evdev.device.capability(), cmd.discriminant())?;
+                cmd.base_ioctl()
+                    .with_writer(|mut writer| write_absinfo(&mut writer, &info))?;
+            }
+            // K1 MUSE Book ---
             _ => {
                 // Most ioctl implementations return `ENOTTY` for invalid ioctl commands, representing "The
                 // specified operation does not apply". However, according to the Linux implementation,
@@ -501,6 +579,7 @@ impl PerOpenFileOps for EvdevFile {
 
         Ok(0)
     }
+    // K1 MUSE Book ---
 
     fn settable_status_flags(&self) -> SettableStatusFlags {
         SettableStatusFlags::minimal().with_o_async()
@@ -514,3 +593,45 @@ impl Drop for EvdevFile {
         }
     }
 }
+
+// K1 MUSE Book --- (variable-sized absolute-axis ioctl regressions)
+#[cfg(ktest)]
+mod abs_ioctl_tests {
+    use aster_input::input_dev::InputCapability;
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn absolute_axis_queries_require_absolute_input() {
+        let mut capability = InputCapability::new();
+        assert_eq!(
+            absinfo_for_ioctl(&capability, 0).unwrap_err().error(),
+            Errno::EINVAL
+        );
+        let info = AbsInfo::range(0, 4095);
+        capability.set_supported_absolute_axis(AbsCode::X, info);
+        assert_eq!(absinfo_for_ioctl(&capability, 0).unwrap(), info);
+        assert_eq!(
+            absinfo_for_ioctl(&capability, 0x3f).unwrap(),
+            AbsInfo::default()
+        );
+    }
+
+    #[ktest]
+    fn absolute_axis_ioctl_accepts_legacy_and_extended_buffer_sizes() {
+        let info = AbsInfo::range(0, 4095);
+        for size in [0usize, 20, 24, 32] {
+            let raw = RawIoctl::new(0x8000_4540 | ((size as u32) << 16), 0);
+            assert!(ioctl_defs::GetAbsInfo::try_from_raw(raw).is_some());
+            let mut bytes = [0xa5; 32];
+            let mut writer = VmWriter::from(&mut bytes[..size]).to_fallible();
+            write_absinfo(&mut writer, &info).unwrap();
+            let copied = size.min(size_of::<AbsInfo>());
+            assert_eq!(&bytes[..copied], &info.as_bytes()[..copied]);
+            assert!(bytes[copied..].iter().all(|byte| *byte == 0xa5));
+        }
+        assert!(ioctl_defs::GetAbsInfo::try_from_raw(RawIoctl::new(0x4024_4540, 0)).is_none());
+    }
+}
+// K1 MUSE Book ---

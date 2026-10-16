@@ -9,3 +9,9 @@ mod system_wide;
 pub(super) fn init() {
     system_wide::init();
 }
+
+// K1 MUSE Book --- (re-sample CLOCK_REALTIME_COARSE after clock_settime)
+pub(super) fn refresh_coarse_realtime() {
+    system_wide::refresh_coarse_realtime();
+}
+// K1 MUSE Book ---

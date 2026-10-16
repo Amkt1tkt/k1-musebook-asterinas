@@ -368,10 +368,26 @@ impl<'a> CursorMut<'a> {
     ///  - the current virtual address is already mapped;
     ///  - the current virtual address is outside the cursor's range.
     pub fn map(&mut self, frame: UFrame, prop: PageProperty) {
+        // K1 MUSE Book --- (X60 negative-caches invalid PTEs; new X pages need I-cache sync)
+        #[cfg(target_arch = "riscv64")]
+        let va = self.virt_addr();
+        #[cfg(target_arch = "riscv64")]
+        let is_exec = prop.flags.contains(PageFlags::X);
+        // K1 MUSE Book ---
         let item = VmItem::new_tracked(frame, prop);
 
         // SAFETY: It is safe to map untyped memory into the userspace.
         unsafe { self.pt_cursor.map(item) };
+
+        // K1 MUSE Book --- (TLB shootdown + deferred I-cache flush after mapping X)
+        #[cfg(target_arch = "riscv64")]
+        crate::arch::mm::tlb_flush_addr(va);
+
+        #[cfg(target_arch = "riscv64")]
+        if is_exec {
+            crate::arch::mm::mark_user_icache_stale();
+        }
+        // K1 MUSE Book ---
     }
 
     /// Maps a range of [`IoMem`] into the current slot.
@@ -394,7 +410,13 @@ impl<'a> CursorMut<'a> {
     ///  - `len`, `offset`, or the address range of the `IoMem` instance is
     ///    not aligned to the page size;
     ///  - the current virtual address is already mapped.
-    pub fn map_iomem(&mut self, io_mem: IoMem, prop: PageProperty, len: usize, offset: usize) {
+    // K1 MUSE Book --- (DMA aliases use the backing's immutable cache policy)
+    // pub fn map_iomem(&mut self, io_mem: IoMem, prop: PageProperty, len: usize, offset: usize) {
+    pub fn map_iomem(&mut self, io_mem: IoMem, mut prop: PageProperty, len: usize, offset: usize) {
+        if let Some(cache) = io_mem.dma_cache_policy() {
+            prop.cache = cache;
+        }
+        // K1 MUSE Book ---
         assert_eq!(len % PAGE_SIZE, 0);
         assert_eq!(offset % PAGE_SIZE, 0);
 
@@ -564,13 +586,31 @@ impl<'a> CursorMut<'a> {
         len: usize,
         mut op: impl FnMut(&mut PageFlags, &mut CachePolicy),
     ) -> Option<Range<Vaddr>> {
+        // K1 MUSE Book --- (mprotect can publish new executable contents)
+        // unsafe {
+        //     self.pt_cursor.protect_next(len, &mut |prop| {
+        //         op(&mut prop.flags, &mut prop.cache);
+        //     })
+        // }
+        #[cfg(target_arch = "riscv64")]
+        let mut is_exec = false;
         // SAFETY: It is safe to set `PageFlags` and `CachePolicy` of memory
         // in the userspace.
-        unsafe {
+        let protected = unsafe {
             self.pt_cursor.protect_next(len, &mut |prop| {
                 op(&mut prop.flags, &mut prop.cache);
+                #[cfg(target_arch = "riscv64")]
+                {
+                    is_exec |= prop.flags.contains(PageFlags::X);
+                }
             })
+        };
+        #[cfg(target_arch = "riscv64")]
+        if is_exec {
+            crate::arch::mm::mark_user_icache_stale();
         }
+        protected
+        // K1 MUSE Book ---
     }
 }
 

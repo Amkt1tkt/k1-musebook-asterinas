@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "k1-musebook-pinctrl"
+version = "0.1.0"
+edition.workspace = true
+
+# K1 MUSE Book: SpacemiT K1 MFPR / padconf and shared OSTD CCU accessors.
+
+[dependencies]
+component.workspace = true
+log.workspace = true
+ostd.workspace = true
+spin.workspace = true
+
+[lints]
+workspace = true

@@ -14,6 +14,19 @@ const PRP_ENTRIES_PER_PAGE: usize = PAGE_SIZE / size_of::<u64>();
 
 const PAGE_SIZE_U64: u64 = PAGE_SIZE as u64;
 
+// K1 MUSE Book --- (PRP list pages are fetched by the controller; K1 DMA is not cache-coherent)
+/// Whether PRP list pages may live in cacheable memory.
+///
+/// The controller reads a PRP list straight from DRAM. On the SpacemiT K1,
+/// PCIe DMA does not snoop the CPU caches, so a list written through a
+/// cacheable mapping would be fetched stale. Request noncoherent DMA memory;
+/// on RISC-V the uncached DRAM guarantee requires Svpbmt support.
+#[cfg(target_arch = "riscv64")]
+const PRP_LIST_CACHE_COHERENT: bool = false;
+#[cfg(not(target_arch = "riscv64"))]
+const PRP_LIST_CACHE_COHERENT: bool = true;
+// K1 MUSE Book ---
+
 pub(crate) struct PrpPointers {
     prp1: u64,
     prp2: u64,
@@ -54,13 +67,17 @@ impl PrpPointers {
         }
     }
 
+    // K1 MUSE Book --- (publish PRP lists through the CPU-visible DMA mapping)
+    //         let first_list_page =
+    //             DmaCoherent::alloc(1, true).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
+    //                 let new_list_page = DmaCoherent::alloc(1, true)
     fn with_list(prp1: u64, mut addr: u64, mut remaining: u64) -> Result<Self, NvmeDeviceError> {
         let mut list_pages = Vec::with_capacity(
             (remaining as usize).div_ceil(PAGE_SIZE * (PRP_ENTRIES_PER_PAGE - 1)),
         );
 
-        let first_list_page =
-            DmaCoherent::alloc(1, true).map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
+        let first_list_page = DmaCoherent::alloc(1, PRP_LIST_CACHE_COHERENT)
+            .map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
         let prp2 = first_list_page.daddr() as u64;
         list_pages.push(first_list_page);
 
@@ -71,7 +88,7 @@ impl PrpPointers {
             // The last entry of a non-last PRP list page must point to the next list
             // page; the last entry of the last list page may point to a data page.
             if cur_list_index == PRP_ENTRIES_PER_PAGE - 1 && remaining > PAGE_SIZE_U64 {
-                let new_list_page = DmaCoherent::alloc(1, true)
+                let new_list_page = DmaCoherent::alloc(1, PRP_LIST_CACHE_COHERENT)
                     .map_err(|_| NvmeDeviceError::DmaAllocationFailed)?;
                 write_prp_entry(cur_list_page, cur_list_index, new_list_page.daddr() as u64);
                 list_pages.push(new_list_page);
@@ -96,6 +113,7 @@ impl PrpPointers {
             list_pages,
         })
     }
+    // K1 MUSE Book ---
 }
 
 /// Returns how many bytes of `length` lie after the page containing `dma_addr`.

@@ -15,6 +15,9 @@ let
   commonBuild = dir: callPackage ./common.nix (commonArgs // { inherit dir; });
 
   subDirs = [
+    # K1 MUSE Book --- (generic dyn-link / FPU tests; drm_probe is opt-in, needs libdrm)
+    "dynamic_linking"
+    # K1 MUSE Book ---
     "fs"
     "hello_world"
     "io"

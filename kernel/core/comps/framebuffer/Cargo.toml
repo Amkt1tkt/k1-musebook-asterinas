@@ -14,5 +14,14 @@ int-to-c-enum.workspace = true
 ostd.workspace = true
 spin.workspace = true
 
+# K1 MUSE Book --- (K1 display pipeline: DPU KMS, eDP/LT8911, PWM backlight; riscv64-only)
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+aster-cmdline.workspace = true
+aster-softirq.workspace = true
+k1-musebook-drm.workspace = true
+k1-musebook-i2c.workspace = true
+k1-musebook-pinctrl.workspace = true
+# K1 MUSE Book ---
+
 [lints]
 workspace = true

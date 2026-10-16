@@ -18,13 +18,21 @@ impl Inode {
     /// Writes xattrs, data pages, and indirect blocks back before staging dirty
     /// inode metadata in the block group's inode-table page cache.
     pub(in ext2) fn sync_all(&self) -> Result<()> {
+        // K1 MUSE Book --- (never-writable mounts cannot persist cached metadata)
+        let fs = self.fs()?;
+        if !fs.has_writable_mount() {
+            return Ok(());
+        }
+        // K1 MUSE Book ---
         // Step 1: flush the xattr.
         if let Some(xattr) = &self.xattr {
             xattr.flush()?;
         }
 
         // Step 2: flush dirty data pages.
-        let fs = self.fs()?;
+        // K1 MUSE Book --- (filesystem acquired before any writeback)
+        // let fs = self.fs()?;
+        // K1 MUSE Book ---
         let mut inner = self.inner.write();
         inner.sync_data_pages()?;
 
@@ -42,6 +50,11 @@ impl Inode {
     /// xattrs.
     pub(in ext2) fn sync_data(&self) -> Result<()> {
         let fs = self.fs()?;
+        // K1 MUSE Book --- (RW-to-RO mounts still flush earlier writable data)
+        if !fs.has_writable_mount() {
+            return Ok(());
+        }
+        // K1 MUSE Book ---
         let mut inner = self.inner.write();
 
         // Step 1: flush dirty data pages.
@@ -61,6 +74,11 @@ impl Inode {
         }
 
         let fs = self.fs()?;
+        // K1 MUSE Book --- (never reclaim on a mount that has only been read-only)
+        if !fs.has_writable_mount() {
+            return Ok(false);
+        }
+        // K1 MUSE Book ---
         let group = fs.block_group(self.block_group_idx);
         if !group.is_inode_allocated(self.ino) {
             return Ok(false);

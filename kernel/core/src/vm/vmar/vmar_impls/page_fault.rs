@@ -6,7 +6,27 @@ use super::{Interval, RssDelta, Vmar};
 use crate::{prelude::*, vm::perms::VmPerms};
 
 impl Vmar {
-    pub(crate) fn handle_page_fault(&self, page_fault_info: &PageFaultInfo) -> Result<()> {
+    // K1 MUSE Book --- (GEM mmap failures carry a signal verdict, not only an errno)
+    // pub(crate) fn handle_page_fault(&self, page_fault_info: &PageFaultInfo) -> Result<()> {
+    //     let inner = self.inner.read();
+    //
+    //     let address = page_fault_info.address;
+    //     if let Some(vm_mapping) = inner.vm_mappings.find_one(&address) {
+    //         debug_assert!(vm_mapping.range().contains(&address));
+    //
+    //         let mut rss_delta = RssDelta::new(self);
+    //         return vm_mapping.handle_page_fault(&self.vm_space, page_fault_info, &mut rss_delta);
+    //     }
+    //
+    //     return_errno_with_message!(
+    //         Errno::EACCES,
+    //         "no VM mappings contain the page fault address"
+    //     );
+    // }
+    pub(crate) fn handle_page_fault(
+        &self,
+        page_fault_info: &PageFaultInfo,
+    ) -> core::result::Result<(), PageFaultFailure> {
         let inner = self.inner.read();
 
         let address = page_fault_info.address;
@@ -17,11 +37,13 @@ impl Vmar {
             return vm_mapping.handle_page_fault(&self.vm_space, page_fault_info, &mut rss_delta);
         }
 
-        return_errno_with_message!(
+        Err(Error::with_message(
             Errno::EACCES,
-            "no VM mappings contain the page fault address"
-        );
+            "no VM mappings contain the page fault address",
+        )
+        .into())
     }
+    // K1 MUSE Book ---
 }
 
 /// Page fault information converted from [`CpuException`].
@@ -65,4 +87,61 @@ impl PageFaultInfo {
         self.is_forced = true;
         self
     }
+
+    // K1 MUSE Book --- (exception.rs is outside `vmar` and needs the fault VA for SIGBUS)
+    pub(crate) fn address(&self) -> Vaddr {
+        self.address
+    }
+    // K1 MUSE Book ---
 }
+
+// K1 MUSE Book --- (refused GEM pages are SIGBUS; other faults stay with the exception)
+/// A page fault that could not be resolved.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PageFaultFailure {
+    error: Error,
+    signal: PageFaultSignal,
+}
+
+impl PageFaultFailure {
+    pub(in crate::vm) fn new(error: Error, signal: PageFaultSignal) -> Self {
+        Self { error, signal }
+    }
+
+    #[cfg_attr(not(ktest), expect(dead_code))]
+    pub(crate) fn error(&self) -> Error {
+        self.error
+    }
+
+    pub(crate) fn signal(&self) -> PageFaultSignal {
+        self.signal
+    }
+}
+
+impl From<Error> for PageFaultFailure {
+    fn from(error: Error) -> Self {
+        Self::new(error, PageFaultSignal::FromException)
+    }
+}
+
+impl From<ostd::Error> for PageFaultFailure {
+    fn from(error: ostd::Error) -> Self {
+        Error::from(error).into()
+    }
+}
+
+impl From<PageFaultFailure> for Error {
+    fn from(failure: PageFaultFailure) -> Self {
+        failure.error
+    }
+}
+
+/// Which signal an unresolvable page fault must be reported to user space with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PageFaultSignal {
+    /// Whatever the CPU exception implies (`SIGSEGV` for a page fault).
+    FromException,
+    /// `SIGBUS`: the address is mapped, but the page has no backing store.
+    Bus,
+}
+// K1 MUSE Book ---

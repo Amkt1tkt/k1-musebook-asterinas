@@ -50,23 +50,74 @@ impl BitmapFont {
     /// Creates a new bitmap font that represents the basic 8x8 font.
     ///
     /// This is the default font for the framebuffer console.
+    // K1 MUSE Book --- (reuse integer scaling for the base font)
     pub fn new_basic8x8() -> Self {
-        const CHAR_COUNT: u32 = 0x7F;
+        // const CHAR_COUNT: u32 = 0x7F;
+        //
+        // const FONT_WIDTH: usize = 8;
+        // const FONT_HEIGHT: usize = 8;
+        //
+        // let bitmap = (0..CHAR_COUNT)
+        //     .flat_map(|ch| {
+        //         font8x8::BASIC_FONTS
+        //             .get(char::from_u32(ch).unwrap())
+        //             .unwrap()
+        //             .into_iter()
+        //     })
+        //     .collect();
+        //
+        // Self::new(FONT_WIDTH, FONT_HEIGHT, bitmap)
+        Self::new_basic8x8_scaled(1)
+    }
+    // K1 MUSE Book ---
 
+    // K1 MUSE Book --- (integer-scaled 8x8 so 1080p console text is readable)
+    /// Creates the basic 8x8 font scaled by an integer factor.
+    ///
+    /// Each source pixel becomes a `scale × scale` block. Use this on high-DPI
+    /// panels (e.g. 1080p) so the VT text is readable; `scale = 1` is identical
+    /// to [`Self::new_basic8x8`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `scale` is zero.
+    pub fn new_basic8x8_scaled(scale: usize) -> Self {
+        assert!(scale >= 1);
+
+        const CHAR_COUNT: u32 = 0x7F;
         const FONT_WIDTH: usize = 8;
         const FONT_HEIGHT: usize = 8;
 
-        let bitmap = (0..CHAR_COUNT)
-            .flat_map(|ch| {
-                font8x8::BASIC_FONTS
-                    .get(char::from_u32(ch).unwrap())
-                    .unwrap()
-                    .into_iter()
-            })
-            .collect();
+        let out_w = FONT_WIDTH * scale;
+        let out_h = FONT_HEIGHT * scale;
+        let out_row_bytes = out_w.div_ceil(u8::BITS as usize);
 
-        Self::new(FONT_WIDTH, FONT_HEIGHT, bitmap)
+        let mut bitmap = Vec::with_capacity(CHAR_COUNT as usize * out_row_bytes * out_h);
+        for ch in 0..CHAR_COUNT {
+            let glyph = font8x8::BASIC_FONTS
+                .get(char::from_u32(ch).unwrap())
+                .unwrap();
+            // `font8x8` yields one `u8` per row (8 columns, LSB = leftmost).
+            for src_row in glyph.into_iter() {
+                let mut out_row = alloc::vec![0u8; out_row_bytes];
+                for src_col in 0..FONT_WIDTH {
+                    if src_row & (1 << src_col) == 0 {
+                        continue;
+                    }
+                    for dx in 0..scale {
+                        let col = src_col * scale + dx;
+                        out_row[col / 8] |= 1 << (col % 8);
+                    }
+                }
+                for _ in 0..scale {
+                    bitmap.extend_from_slice(&out_row);
+                }
+            }
+        }
+
+        Self::new(out_w, out_h, bitmap.into_boxed_slice())
     }
+    // K1 MUSE Book ---
 
     /// Creates a new bitmap font with the specified `vpitch` value.
     ///

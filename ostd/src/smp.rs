@@ -22,6 +22,22 @@ use crate::{
     util::id_set::Id,
 };
 
+// K1 MUSE Book --- (skip remote TLB IPIs until APs leave the bootstrap wait loop)
+/// Whether the AP entry has been published, allowing bootstrap waiters to
+/// service queued IPIs. Set by [`crate::boot::smp::register_ap_entry`].
+static APS_ONLINE: AtomicBool = AtomicBool::new(false);
+
+/// Publishes IPI readiness after the AP entry is registered.
+pub(crate) fn set_aps_online() {
+    APS_ONLINE.store(true, Ordering::Release);
+}
+
+/// Returns whether AP bootstrap waiters may service queued IPIs.
+pub(crate) fn aps_online() -> bool {
+    APS_ONLINE.load(Ordering::Acquire)
+}
+// K1 MUSE Book ---
+
 /// Executes a function on other processors.
 ///
 /// The provided function `call_fn` will be executed on all target processors

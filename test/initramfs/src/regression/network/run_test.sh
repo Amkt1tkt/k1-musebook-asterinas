@@ -42,3 +42,6 @@ sleep 0.2
 ./netlink_route
 ./rtnl_err
 ./uevent_err
+# K1 MUSE Book --- (SO_ATTACH_FILTER on NETLINK_KOBJECT_UEVENT)
+./uevent_filter
+# K1 MUSE Book ---

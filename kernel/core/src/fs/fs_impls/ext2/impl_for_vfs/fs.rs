@@ -25,12 +25,23 @@ impl FileSystem for Ext2 {
     }
 
     fn sync(&self) -> Result<()> {
+        // K1 MUSE Book --- (a never-writable mount has nothing to persist)
+        if !self.has_writable_mount() {
+            return Ok(());
+        }
+        // K1 MUSE Book ---
         self.sync_all()?;
         if self.block_device().sync()? != BioStatus::Complete {
             return_errno_with_message!(Errno::EIO, "failed to flush block device");
         }
         Ok(())
     }
+
+    // K1 MUSE Book --- (reboot path: mark the volume clean for e2fsck -p)
+    fn sync_for_shutdown(&self) -> Result<()> {
+        self.mark_clean()
+    }
+    // K1 MUSE Book ---
 
     fn root_inode(&self) -> Arc<dyn Inode> {
         self.root_inode().unwrap()
@@ -66,7 +77,10 @@ impl FileSystem for Ext2 {
     }
 
     fn set_fs_flags(&self, flags: FsFlags, _data: Option<&str>, _ctx: &Context) -> Result<()> {
-        self.set_fs_flags(flags);
+        // K1 MUSE Book --- (a failed ro->rw dirty barrier leaves the mount read-only)
+        // self.set_fs_flags(flags);
+        self.set_fs_flags(flags)?;
+        // K1 MUSE Book ---
         warn!("ext2-specific handling for filesystem flags is not implemented");
         Ok(())
     }

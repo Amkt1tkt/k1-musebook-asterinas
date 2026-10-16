@@ -10,6 +10,10 @@ pub(crate) const MAX_NS_NUM: usize = 1024;
 pub(crate) enum NvmeDeviceError {
     BlockDeviceRegisterFailed,
     CommandFailed,
+    // K1 MUSE Book --- (a timeout does not establish DMA completion)
+    CommandTimedOut,
+    ControllerFailed,
+    // K1 MUSE Book ---
     ControllerEnableTimeout,
     InvalidControllerConfig,
     MsixAllocationFailed,

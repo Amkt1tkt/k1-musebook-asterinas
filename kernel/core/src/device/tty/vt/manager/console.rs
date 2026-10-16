@@ -2,7 +2,10 @@
 
 #![short_vis_path::add(vt)]
 
-use alloc::sync::Weak;
+// K1 MUSE Book --- (allocate the framebuffer backend only for initialized VTs)
+// use alloc::sync::Weak;
+use alloc::{boxed::Box, sync::Weak};
+// K1 MUSE Book ---
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use aster_framebuffer::{
@@ -28,7 +31,10 @@ pub(in vt) struct VtConsole {
 /// The VT console backend.
 enum VtConsoleBackend {
     /// Framebuffer exists and is used for this VT console.
-    Framebuffer(FramebufferConsole),
+    // K1 MUSE Book --- (uninitialized VTs must not reserve the framebuffer console state)
+    // Framebuffer(FramebufferConsole),
+    Framebuffer(Box<FramebufferConsole>),
+    // K1 MUSE Book ---
     /// No framebuffer device is available or framebuffer exists but this VT console
     /// is not initialized.
     None,
@@ -227,6 +233,11 @@ impl VtConsole {
 
     /// Marks this VT as active.
     pub(super) fn activate(&self) {
+        // K1 MUSE Book --- (FramebufferConsole::activate flushes the shadow over the panel)
+        if aster_framebuffer::splash::is_active() {
+            return;
+        }
+        // K1 MUSE Book ---
         let mut backend = self.backend.lock();
         if let VtConsoleBackend::Framebuffer(c) = &mut *backend {
             c.activate();
@@ -284,10 +295,24 @@ impl VtConsole {
         {
             let mut console = FramebufferConsole::new(fb.clone());
             console.set_mode(mode);
-            *backend = VtConsoleBackend::Framebuffer(console);
+            // K1 MUSE Book --- (this path already allocates the framebuffer shadow and font)
+            // *backend = VtConsoleBackend::Framebuffer(console);
+            *backend = VtConsoleBackend::Framebuffer(Box::new(console));
+            // K1 MUSE Book ---
         }
         self.is_allocated.store(true, Ordering::Relaxed);
     }
+
+    // K1 MUSE Book --- (TIOCGWINSZ from the framebuffer cell grid)
+    /// Returns framebuffer cell geometry for `TIOCGWINSZ`, if this VT has an FB backend.
+    pub(super) fn window_geometry(&self) -> Option<(u16, u16, u16, u16)> {
+        let backend = self.backend.lock();
+        match &*backend {
+            VtConsoleBackend::Framebuffer(c) => Some(c.window_geometry()),
+            VtConsoleBackend::None => None,
+        }
+    }
+    // K1 MUSE Book ---
 
     /// Disallocates this VT.
     pub(super) fn disallocate(&self) {

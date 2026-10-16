@@ -107,24 +107,58 @@ impl WaitQueue {
         }
     }
 
+    // K1 MUSE Book --- (bound wake-all to a detached snapshot so requeued waiters cannot livelock completion)
+    // /// Wakes up all waiting threads, returning the number of threads that were woken up.
+    // pub fn wake_all(&self) -> usize {
+    //     // Fast path
+    //     if self.is_empty() {
+    //         return 0;
+    //     }
+    //
+    //     let mut num_woken = 0;
+    //
+    //     loop {
+    //         let mut wakers = self.wakers.lock();
+    //         let Some(waker) = wakers.pop_front() else {
+    //             break;
+    //         };
+    //         self.num_wakers.fetch_sub(1, Ordering::Release);
+    //         // Avoid holding lock when calling `wake_up`
+    //         drop(wakers);
+    //
+    //         if waker.wake_up() {
+    //             num_woken += 1;
+    //         }
+    //     }
+    //
+    //     num_woken
+    // }
     /// Wakes up all waiting threads, returning the number of threads that were woken up.
+    ///
+    /// Only entries present when the queue is detached are processed. Waiters that
+    /// enqueue again after a wake remain queued for a later wake operation.
     pub fn wake_all(&self) -> usize {
         // Fast path
         if self.is_empty() {
             return 0;
         }
 
-        let mut num_woken = 0;
-
-        loop {
+        let wakers = {
             let mut wakers = self.wakers.lock();
-            let Some(waker) = wakers.pop_front() else {
-                break;
-            };
-            self.num_wakers.fetch_sub(1, Ordering::Release);
-            // Avoid holding lock when calling `wake_up`
-            drop(wakers);
+            let pending = core::mem::take(&mut *wakers);
+            // Keep this an RMW: is_empty() and enqueue() synchronize through
+            // the counter's release sequences. A store could break a preceding
+            // wake operation's release sequence and lose its condition update.
+            self.num_wakers.swap(0, Ordering::Release);
+            pending
+        };
 
+        // A queue can serve several conditions (for example, hashed page locks).
+        // Wake only this finite snapshot: a waiter whose condition is still false
+        // can otherwise re-enqueue on another CPU and prolong this call forever.
+        // Keep scheduler operations and Waker drops outside the queue lock.
+        let mut num_woken = 0;
+        for waker in wakers {
             if waker.wake_up() {
                 num_woken += 1;
             }
@@ -132,6 +166,7 @@ impl WaitQueue {
 
         num_woken
     }
+    // K1 MUSE Book ---
 
     fn is_empty(&self) -> bool {
         // On x86-64, this generates `mfence; mov`, which is exactly the right way to implement
@@ -398,3 +433,8 @@ mod test {
         assert!(cond2.load(Ordering::Relaxed));
     }
 }
+
+// K1 MUSE Book --- (regress finite wake-all batches with actual OSTD waiters)
+#[cfg(ktest)]
+mod k1_wake_all_tests;
+// K1 MUSE Book ---

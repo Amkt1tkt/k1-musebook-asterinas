@@ -18,6 +18,18 @@ pub(super) fn sys_write(
         raw_fd, user_buf_ptr, user_buf_len
     );
 
+    // K1 MUSE Book --- (k1.diag=stderr: echo fd 2 before it disappears into journald)
+    // `k1.diag=stderr`: echo what goes to fd 2 before it disappears into
+    // journald's socket. A separate reader over (a prefix of) the same user
+    // buffer; the syscall's own reader below is untouched.
+    if raw_fd == 2 && user_buf_len != 0 && super::proc_diag::stderr_on() {
+        let len = user_buf_len.min(super::proc_diag::STDERR_TEE_MAX);
+        if let Ok(reader) = ctx.user_space().reader(user_buf_ptr, len) {
+            super::proc_diag::tee_stderr(ctx, &mut [reader]);
+        }
+    }
+    // K1 MUSE Book ---
+
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, raw_fd.try_into()?);
 

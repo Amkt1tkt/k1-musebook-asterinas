@@ -100,6 +100,22 @@ pub(super) fn split_daddr(daddr: Option<Daddr>, offset: usize) -> (Option<Daddr>
     }
 }
 
+// K1 MUSE Book --- (allocation-time cache policy shared with DmaCoherent aliases)
+pub(super) fn kva_cache_policy(is_cache_coherent: bool) -> CachePolicy {
+    if is_cache_coherent {
+        CachePolicy::Writeback
+    } else if cfg!(target_arch = "riscv64") {
+        if crate::arch::mm::can_map_uncacheable() {
+            CachePolicy::WriteCombining
+        } else {
+            CachePolicy::Writeback
+        }
+    } else {
+        CachePolicy::Uncacheable
+    }
+}
+// K1 MUSE Book ---
+
 pub(super) fn alloc_kva(
     nframes: usize,
     is_cache_coherent: bool,
@@ -107,6 +123,9 @@ pub(super) fn alloc_kva(
     let segment = Segment::from_unsized(
         FrameAllocOptions::new()
             .zeroed(false)
+            // K1 MUSE Book --- (KVA bounce/uncached DMA must be 32-bit-reachable)
+            .dma_capable(true)
+            // K1 MUSE Book ---
             .alloc_segment_with(nframes, |_| DmaBufferMeta)?,
     );
 
@@ -118,11 +137,31 @@ pub(super) fn alloc_kva(
         PrivilegedPageFlags::empty()
     };
 
-    let cache = if is_cache_coherent {
-        CachePolicy::Writeback
-    } else {
-        CachePolicy::Uncacheable
-    };
+    // K1 MUSE Book --- (one cache selector for the KVA and its owned aliases)
+    // let cache = if is_cache_coherent {
+    //     CachePolicy::Writeback
+    // } else {
+    //     CachePolicy::Uncacheable
+    // };
+    let cache = kva_cache_policy(is_cache_coherent);
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (flush the linear alias before changing its cache policy)
+    if !is_cache_coherent && crate::arch::mm::can_sync_dma() {
+        let start = crate::mm::paddr_to_vaddr(segment.paddr());
+        let range = start..start + segment.size();
+        // Clean and then invalidate the old linear alias before exposing a
+        // differently cached KVA. Directional sync no longer implies both.
+        // SAFETY:
+        // 1. `segment` is untyped DMA memory this function owns.
+        // 2. `can_sync_dma()` is checked just above.
+        // 3. Both operations cover the same complete, live allocation.
+        unsafe {
+            crate::arch::mm::sync_dma_range(range.clone(), false);
+            crate::arch::mm::sync_dma_range(range, true);
+        }
+    }
+    // K1 MUSE Book ---
 
     let paddr = segment.paddr();
     let kva = KVirtArea::map_frames(
@@ -156,6 +195,10 @@ pub(super) fn alloc_kva(
 /// The provided physical address range must be untyped DMA memory that
 /// outlives the following [`unprepare_dma()`] call.
 pub(super) unsafe fn prepare_dma(pa_range: &Range<Paddr>) -> Option<Daddr> {
+    // K1 MUSE Book --- (catch a high-bank DMA address before a device sees it)
+    super::warn_if_addr_unreachable(pa_range.start, pa_range.end.saturating_sub(pa_range.start));
+    // K1 MUSE Book ---
+
     // SAFETY: The safety condition is upheld by the caller.
     #[cfg(any(debug_assertions, all(target_arch = "x86_64", feature = "cvm_guest")))]
     unsafe {

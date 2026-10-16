@@ -5,6 +5,9 @@
 #![expect(dead_code)]
 
 pub mod boot;
+// K1 MUSE Book --- (K1 clock/reset controller; drivers ungate peripherals after IoMem is live)
+pub mod ccu;
+// K1 MUSE Book ---
 pub mod cpu;
 pub mod device;
 pub(crate) mod io;
@@ -61,6 +64,10 @@ pub(crate) unsafe fn late_init_on_bsp() {
     // 1. All the system device memory have been removed from the builder.
     // 2. RISC-V platforms do not have port I/O.
     unsafe { crate::io::init(io_mem_builder) };
+
+    // K1 MUSE Book --- (bring up the K1 CCU after IoMem::acquire is available)
+    ccu::init();
+    // K1 MUSE Book ---
 }
 
 /// Initializes application-processor-specific state.

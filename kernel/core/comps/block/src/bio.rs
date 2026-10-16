@@ -392,6 +392,21 @@ pub enum BioDirection {
 }
 
 impl BioSegment {
+    // K1 MUSE Book --- (test actual segment lifetime without retaining a DMA arena)
+    /// Returns a non-owning lifetime probe for DMA ownership regression tests.
+    #[cfg(ktest)]
+    pub fn weak_owner_for_test(&self) -> alloc::sync::Weak<dyn Any + Send + Sync> {
+        let owner: Arc<dyn Any + Send + Sync> = self.inner.clone();
+        Arc::downgrade(&owner)
+    }
+
+    /// Reports whether a test fixture actually allocated a shared-arena slice.
+    #[cfg(ktest)]
+    pub fn is_arena_allocated_for_test(&self) -> bool {
+        matches!(self.inner.storage.mem_obj(), DmaBuffer::Arena(_))
+    }
+    // K1 MUSE Book ---
+
     /// Allocates a new `BioSegment` with the wanted blocks count and
     /// the bio direction.
     pub fn alloc(nblocks: usize, direction: BioDirection) -> Self {

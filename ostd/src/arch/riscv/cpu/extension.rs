@@ -42,6 +42,15 @@ pub(in crate::arch) fn init() {
 
     crate::info!("Detected ISA extensions: {:?}", global_isa_extensions);
 
+    // K1 MUSE Book --- (non-cacheable DRAM requires a PBMT override)
+    if !global_isa_extensions.contains(IsaExtensions::SVPBMT) {
+        crate::warn!(
+            "[riscv] Svpbmt is absent: non-cacheable DRAM mappings cannot override PMA; \
+             non-coherent DMA requires explicit cache synchronization."
+        );
+    }
+    // K1 MUSE Book ---
+
     GLOBAL_ISA_EXTENSIONS.call_once(|| global_isa_extensions);
 }
 

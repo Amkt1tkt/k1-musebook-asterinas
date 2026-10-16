@@ -5,10 +5,18 @@
   ...
 }:
 let
+  # K1 MUSE Book --- (NixOS 25.05 keeps Xfce and Xorg packages in scopes)
+  xfceSession = pkgs.xfce4-session or pkgs.xfce.xfce4-session;
+  fbdev = pkgs.xf86-video-fbdev or pkgs.xorg.xf86videofbdev;
+  keyboardConfig = pkgs.xkeyboard-config or pkgs.xorg.xkeyboardconfig;
+  # K1 MUSE Book ---
   startXfce = pkgs.writeScriptBin "start_xfce" (
     builtins.replaceStrings
       [ "@runtime_shell@" "@xfce_xinitrc@" ]
-      [ pkgs.runtimeShell pkgs.xfce4-session.xinitrc ]
+      # K1 MUSE Book --- (use the session package selected for this nixpkgs)
+      # [ pkgs.runtimeShell pkgs.xfce4-session.xinitrc ]
+      [ pkgs.runtimeShell xfceSession.xinitrc ]
+      # K1 MUSE Book ---
       (builtins.readFile ./start_xfce.sh)
   );
 in
@@ -20,8 +28,12 @@ in
       config.services.xserver.enable && config.services.xserver.desktopManager.xfce.enable
     ) [ startXfce ])
     ++ (lib.optionals config.services.xserver.enable [
-      pkgs.xf86-video-fbdev
-      pkgs.xkeyboard-config
+      # K1 MUSE Book --- (use the Xorg packages selected for this nixpkgs)
+      # pkgs.xf86-video-fbdev
+      # pkgs.xkeyboard-config
+      fbdev
+      keyboardConfig
+      # K1 MUSE Book ---
     ]);
 
   services.displayManager.autoLogin.enable = false;

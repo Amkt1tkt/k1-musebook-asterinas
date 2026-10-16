@@ -78,16 +78,27 @@ Supported functionality in SCML:
 {{#include sendto_and_sendmsg.scml}}
 ```
 
+<!-- K1 MUSE Book --- (per-call nonblocking I/O and SIGPIPE suppression are supported) -->
+<!-- Original upstream unsupported-flag entries:
+* `MSG_DONTWAIT`
+* `MSG_NOSIGNAL`
+-->
 Unsupported flags:
 * `MSG_CONFIRM`
 * `MSG_DONTROUTE`
-* `MSG_DONTWAIT`
 * `MSG_EOR`
 * `MSG_MORE`
 * `MSG_CONFIRM`
-* `MSG_NOSIGNAL`
 * `MSG_OOB`
 * `MSG_FASTOPEN`
+
+`MSG_DONTWAIT` selects nonblocking behavior for this call without changing the descriptor.
+`MSG_NOSIGNAL` is accepted; the current send paths do not generate `SIGPIPE` on `EPIPE`.
+UNIX sockets carry `SOL_SOCKET` ancillary messages of type `SCM_RIGHTS` and `SCM_CREDENTIALS`.
+Explicit credentials must match the sender's real credentials;
+passing a UNIX stream socket itself requires `CAP_SYS_ADMIN` in the initial user namespace.
+The SCML header patterns describe these ancillary types, with the UNIX-socket restriction stated here.
+<!-- K1 MUSE Book --- -->
 
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/sendto.2.html).
@@ -99,6 +110,14 @@ Supported functionality in SCML:
 ```c
 {{#include recvfrom_and_recvmsg.scml}}
 ```
+
+<!-- K1 MUSE Book --- (document receive-call flags and received-descriptor ownership) -->
+`MSG_DONTWAIT` selects nonblocking behavior for this call.
+`MSG_CMSG_CLOEXEC` applies `FD_CLOEXEC` to the descriptors installed by received UNIX `SCM_RIGHTS` messages.
+`SCM_CREDENTIALS` delivery depends on the socket's `SO_PASSCRED` setting.
+Ancillary delivery is limited to these `SOL_SOCKET` UNIX message types;
+an insufficient control buffer is reported with `MSG_CTRUNC`.
+<!-- K1 MUSE Book --- -->
 
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/recvfrom.2.html).

@@ -228,3 +228,76 @@ i8042.exist
 i8042.exist=1
 i8042.exist=0
 ```
+
+<!-- K1 MUSE Book --- (document the board parameters from their actual parsers) -->
+## K1 MUSE Book parameters
+
+These parameters apply to the corresponding K1 components when they are linked into the kernel.
+Values are case-sensitive except for the explicitly listed touchpad aliases.
+Repeated `key=value` parameters use the last value before the `--` separator.
+
+### `k1.diag`
+
+Enable selected diagnostic tags with a comma-separated list.
+Active consumers use `therm`, `batt`, `rtc`, `gpu`, `proc`, and `stderr`;
+unknown tags select no additional output.
+An absent or empty value disables tagged output.
+The keywords `all`, `on`, `1`, `yes`, and `true` enable every tag;
+`off`, `none`, `0`, `no`, and `false` disable them.
+The first keyword encountered in a list takes precedence over its other entries.
+Warnings, errors, and one-time initialization messages remain independent of this setting.
+Diagnostic output can consume serial-console bandwidth.
+
+```text
+k1.diag=therm,batt
+k1.diag=off
+```
+
+### `k1.cursorplane`
+
+Request the optional hardware cursor plane.
+Accepted values are `1`, `on`, `yes`, or `true` to request it,
+and `0`, `off`, `no`, or `false` to disable it.
+The default is disabled; an invalid value is rejected.
+A request advertises the cursor plane only when the board register-layout probe succeeds.
+
+### `k1.splash`
+
+Choose the eDP boot splash: `off` disables it, `quiet` displays progress,
+and `log` also mirrors recent kernel messages.
+The default on RISC-V is `log`; other architectures have no K1 splash.
+Aliases for `off` are `0`, `none`, `false`, and `no`;
+`silent` aliases `quiet`;
+`on`, `1`, `true`, `yes`, and `verbose` alias `log`.
+
+### `k1.cpufreq`
+
+Allow CPU frequency/voltage updates with `on`, `1`, `true`, or `yes` (the default).
+`off`, `0`, `false`, or `no` disable DVFS writes.
+Hardware initialization and failure handling can still prevent updates.
+
+### `k1.touchpad`
+
+Select absolute HID reporting with `abs` or `ABS` (the default),
+or relative reporting with `rel` or `REL`.
+
+### `k1.gpuclk`
+
+`307` or `307.2` retain the GPU reset mux/divider configuration (the default).
+`614` or `614.4` request the board's 614.4 MHz core-clock configuration.
+The parameter does not implement an arbitrary frequency interface.
+
+### `k1.gpuidle`
+
+Set the PowerVR autosuspend delay to a positive decimal number of milliseconds;
+the default is 50 ms.
+`off`, `never`, `none`, `disable`, or `-1` disable autosuspend after the first client.
+Zero and other invalid values are rejected.
+
+### `k1.dumb.fill`
+
+Set the extra 32-bit fill value for newly allocated K1 dumb buffers,
+using decimal or `0x` hexadecimal notation.
+The default is `0x00000001`; `0` disables the extra fill.
+Buffer initialization and cache synchronization still follow their normal ownership contract.
+<!-- K1 MUSE Book --- -->

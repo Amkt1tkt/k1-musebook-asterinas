@@ -113,6 +113,16 @@ pub fn poweroff(code: ExitCode) -> ! {
     machine_halt();
 }
 
+// K1 MUSE Book --- (shutdown errors must halt without retrying a power cut)
+/// Halts every CPU without asking firmware or a PMIC to remove power.
+///
+/// This does not flush filesystems. Callers must complete their own shutdown
+/// protocol first, or use this to stop after a shutdown error.
+pub fn halt() -> ! {
+    machine_halt()
+}
+// K1 MUSE Book ---
+
 fn machine_halt() -> ! {
     crate::error!("Halting the machine...");
 

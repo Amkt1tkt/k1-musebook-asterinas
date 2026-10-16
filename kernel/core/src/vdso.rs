@@ -13,14 +13,20 @@
 //! mapped into the address space of every user space process for efficient access.
 
 use alloc::sync::Arc;
+// K1 MUSE Book --- (order shared vDSO data around its sequence publication)
+use core::sync::atomic::{Ordering, fence};
 use core::{mem::ManuallyDrop, time::Duration};
 
+// K1 MUSE Book ---
 use aster_time::{Instant, read_monotonic_time};
 use aster_util::coeff::Coeff;
 use ostd::{
     const_assert,
     mm::{PAGE_SIZE, UFrame, VmIo, VmIoOnce, VmReader},
-    sync::SpinLock,
+    // K1 MUSE Book --- (clock setters and timer callbacks share vDSO data)
+    // sync::SpinLock,
+    sync::{LocalIrqDisabled, SpinLock},
+    // K1 MUSE Book ---
 };
 use ostd_pod::IntoBytes;
 use spin::Once;
@@ -28,7 +34,9 @@ use spin::Once;
 use crate::{
     syscall::ClockId,
     time::{
-        START_TIME, SystemTime,
+        // K1 MUSE Book --- (the immutable boot sample is not the realtime origin)
+        // START_TIME, SystemTime,
+        // K1 MUSE Book ---
         clocks::MonotonicClock,
         timer::{Timeout, TimerGuard},
     },
@@ -39,7 +47,9 @@ const CLOCK_TAI: usize = 11;
 const VDSO_BASES: usize = CLOCK_TAI + 1;
 const DEFAULT_CLOCK_MODE: VdsoClockMode = VdsoClockMode::Tsc;
 
-static START_SECS_COUNT: Once<u64> = Once::new();
+// K1 MUSE Book --- (the syscall wall origin also supplies vDSO realtime)
+// static START_SECS_COUNT: Once<u64> = Once::new();
+// K1 MUSE Book ---
 static VDSO: Once<Arc<Vdso>> = Once::new();
 
 #[derive(Clone, Copy, Debug)]
@@ -160,33 +170,96 @@ impl VdsoData {
         self.basetime[clockid].nanos_info = nanos_info;
     }
 
-    fn update_high_res_instant(&mut self, instant: Instant, instant_cycles: u64) {
-        self.last_cycles = instant_cycles;
-        for clock_id in HIGH_RES_CLOCK_IDS {
-            let secs = if clock_id == ClockId::CLOCK_REALTIME {
-                instant.secs() + START_SECS_COUNT.get().unwrap()
-            } else {
-                instant.secs()
-            };
+    // K1 MUSE Book --- (one precise encoding for timer and setter updates)
+    fn update_sample(
+        &mut self,
+        clock_id: ClockId,
+        monotonic: Duration,
+        origin: Duration,
+        shifted: bool,
+    ) {
+        let sample = match clock_id {
+            ClockId::CLOCK_REALTIME | ClockId::CLOCK_REALTIME_COARSE => {
+                origin.checked_add(monotonic).unwrap()
+            }
+            _ => monotonic,
+        };
+        let nanos = u64::from(sample.subsec_nanos());
+        let encoded = if shifted { nanos << self.shift } else { nanos };
+        self.update_clock_instant(clock_id as usize, sample.as_secs(), encoded);
+    }
 
-            self.update_clock_instant(
-                clock_id as usize,
-                secs,
-                (instant.nanos() as u64) << self.shift as u64,
+    fn restamp_realtime(&mut self, origin: Duration) {
+        for (mono_id, real_id, shifted) in [
+            (ClockId::CLOCK_MONOTONIC, ClockId::CLOCK_REALTIME, true),
+            (
+                ClockId::CLOCK_MONOTONIC_COARSE,
+                ClockId::CLOCK_REALTIME_COARSE,
+                false,
+            ),
+        ] {
+            let mono = self.basetime[mono_id as usize];
+            let nanos = if shifted {
+                mono.nanos_info >> self.shift
+            } else {
+                mono.nanos_info
+            };
+            self.update_sample(
+                real_id,
+                Duration::new(mono.secs, nanos as u32),
+                origin,
+                shifted,
             );
         }
     }
+    // K1 MUSE Book ---
 
-    fn update_coarse_res_instant(&mut self, instant: Instant) {
-        for clock_id in COARSE_RES_CLOCK_IDS {
-            let secs = if clock_id == ClockId::CLOCK_REALTIME_COARSE {
-                instant.secs() + START_SECS_COUNT.get().unwrap()
-            } else {
-                instant.secs()
-            };
-            self.update_clock_instant(clock_id as usize, secs, instant.nanos() as u64);
+    // K1 MUSE Book --- (preserve fractional realtime in the vDSO snapshot)
+    // fn update_high_res_instant(&mut self, instant: Instant, instant_cycles: u64) {
+    //     self.last_cycles = instant_cycles;
+    //     for clock_id in HIGH_RES_CLOCK_IDS {
+    //         let secs = if clock_id == ClockId::CLOCK_REALTIME {
+    //             instant.secs() + START_SECS_COUNT.get().unwrap()
+    //         } else {
+    //             instant.secs()
+    //         };
+    //
+    //         self.update_clock_instant(
+    //             clock_id as usize,
+    //             secs,
+    //             (instant.nanos() as u64) << self.shift as u64,
+    //         );
+    //     }
+    // }
+    fn update_high_res_instant(&mut self, instant: Instant, instant_cycles: u64) {
+        self.last_cycles = instant_cycles;
+        let monotonic = Duration::new(instant.secs(), instant.nanos());
+        let origin = crate::time::wall_origin();
+        for clock_id in HIGH_RES_CLOCK_IDS {
+            self.update_sample(clock_id, monotonic, origin, true);
         }
     }
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (preserve fractional realtime in the vDSO snapshot)
+    // fn update_coarse_res_instant(&mut self, instant: Instant) {
+    //     for clock_id in COARSE_RES_CLOCK_IDS {
+    //         let secs = if clock_id == ClockId::CLOCK_REALTIME_COARSE {
+    //             instant.secs() + START_SECS_COUNT.get().unwrap()
+    //         } else {
+    //             instant.secs()
+    //         };
+    //         self.update_clock_instant(clock_id as usize, secs, instant.nanos() as u64);
+    //     }
+    // }
+    fn update_coarse_res_instant(&mut self, instant: Instant) {
+        let monotonic = Duration::new(instant.secs(), instant.nanos());
+        let origin = crate::time::wall_origin();
+        for clock_id in COARSE_RES_CLOCK_IDS {
+            self.update_sample(clock_id, monotonic, origin, false);
+        }
+    }
+    // K1 MUSE Book ---
 }
 
 macro_rules! vdso_data_field_offset {
@@ -200,7 +273,10 @@ macro_rules! vdso_data_field_offset {
 /// See [the module-level documentations](self) for more about the vDSO mechanism.
 struct Vdso {
     /// A `VdsoData` instance.
-    data: SpinLock<VdsoData>,
+    // K1 MUSE Book --- (exclude local timer callbacks while a setter updates data)
+    // data: SpinLock<VdsoData>,
+    data: SpinLock<VdsoData, LocalIrqDisabled>,
+    // K1 MUSE Book ---
     /// A VMO that contains the entire vDSO, including the library text and the vDSO data.
     vmo: Arc<Vmo>,
     /// A frame that contains the vDSO data. This frame is contained in and will not be removed
@@ -322,6 +398,9 @@ impl Vdso {
         self.data_frame
             .write_once(vdso_data_field_offset!(seq), &data.seq)
             .unwrap();
+        // K1 MUSE Book --- (Linux vdso_write_begin: odd seq precedes data stores)
+        fence(Ordering::Release);
+        // K1 MUSE Book ---
     }
 
     /// Updates the requisite fields of the vDSO data in the frame.
@@ -345,8 +424,14 @@ impl Vdso {
         debug_assert!(!data.seq.is_multiple_of(2));
 
         data.seq = data.seq.wrapping_add(1);
+        // K1 MUSE Book --- (Linux vdso_write_end: data stores precede even seq)
+        // Original upstream FIXME:
         // FIXME: To synchronize with the vDSO library, this needs to be an atomic write with the
         // Release memory order.
+        // The aligned sequence write is indivisible; this fence supplies its
+        // publication ordering and pairs with the Linux vDSO reader barriers.
+        fence(Ordering::Release);
+        // K1 MUSE Book ---
         self.data_frame
             .write_once(vdso_data_field_offset!(seq), &data.seq)
             .unwrap();
@@ -366,15 +451,53 @@ fn update_vdso_coarse_res_instant(_guard: TimerGuard) {
     VDSO.get().unwrap().update_coarse_res_instant(instant);
 }
 
-/// Initializes the time duration from 1970-01-01 00:00:00 to the start time.
-fn init_start_secs_count() {
-    let time_duration = START_TIME
-        .get()
-        .unwrap()
-        .duration_since(&SystemTime::UNIX_EPOCH)
-        .unwrap();
-    START_SECS_COUNT.call_once(|| time_duration.as_secs());
+// K1 MUSE Book --- (refresh existing realtime samples immediately after clock_settime)
+// /// Initializes the time duration from 1970-01-01 00:00:00 to the start time.
+// fn init_start_secs_count() {
+//     let time_duration = START_TIME
+//         .get()
+//         .unwrap()
+//         .duration_since(&SystemTime::UNIX_EPOCH)
+//         .unwrap();
+//     START_SECS_COUNT.call_once(|| time_duration.as_secs());
+// }
+/// Restamps realtime using the existing monotonic samples and cycle anchor.
+/// Monotonic values, coefficients, and the vDSO ABI layout remain unchanged.
+pub(crate) fn refresh_realtime() {
+    let Some(vdso) = VDSO.get() else {
+        return;
+    };
+    let mut data = vdso.data.lock();
+    data.restamp_realtime(crate::time::wall_origin());
+    vdso.begin_update_data_frame(&mut data);
+    vdso.update_data_frame_instant(ClockId::CLOCK_REALTIME, &mut data);
+    vdso.update_data_frame_instant(ClockId::CLOCK_REALTIME_COARSE, &mut data);
+    vdso.finish_update_data_frame(&mut data);
 }
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (gettimeofday's vDSO path shares kernel timezone metadata)
+pub(crate) fn refresh_timezone() {
+    let Some(vdso) = VDSO.get() else {
+        return;
+    };
+    let mut data = vdso.data.lock();
+    let timezone = crate::time::timezone();
+    data.tz_minuteswest = timezone.tz_minuteswest;
+    data.tz_dsttime = timezone.tz_dsttime;
+    vdso.begin_update_data_frame(&mut data);
+    vdso.data_frame
+        .write_once(
+            vdso_data_field_offset!(tz_minuteswest),
+            &data.tz_minuteswest,
+        )
+        .unwrap();
+    vdso.data_frame
+        .write_once(vdso_data_field_offset!(tz_dsttime), &data.tz_dsttime)
+        .unwrap();
+    vdso.finish_update_data_frame(&mut data);
+}
+// K1 MUSE Book ---
 
 /// Initializes the vDSO singleton.
 fn init_vdso() {
@@ -383,8 +506,13 @@ fn init_vdso() {
 }
 
 pub(super) fn init_in_first_kthread() {
-    init_start_secs_count();
+    // K1 MUSE Book --- (realtime is initialized by time::system_time)
+    // init_start_secs_count();
+    // K1 MUSE Book ---
     init_vdso();
+    // K1 MUSE Book --- (preserve timezone state if vDSO setup follows a setter)
+    refresh_timezone();
+    // K1 MUSE Book ---
 
     aster_time::VDSO_DATA_HIGH_RES_UPDATE_FN.call_once(|| update_vdso_high_res_instant);
 
@@ -467,3 +595,55 @@ const_assert!(
     VDSO_VMO_LAYOUT.data_offset + size_of::<VdsoData>()
         <= VDSO_VMO_LAYOUT.data_segment_offset + VDSO_VMO_LAYOUT.data_segment_size
 );
+
+// K1 MUSE Book --- (vDSO uses the full syscall wall origin)
+#[cfg(ktest)]
+mod realtime_tests {
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn realtime_samples_include_the_wall_origins_nanoseconds() {
+        let monotonic = Duration::new(12, 900_000_000);
+        let origin = Duration::new(1_700_000_000, 300_000_000);
+        let mut data = VdsoData::empty();
+        data.shift = 24;
+        data.last_cycles = 123;
+        for clock_id in HIGH_RES_CLOCK_IDS {
+            data.update_sample(clock_id, monotonic, origin, true);
+        }
+        for clock_id in COARSE_RES_CLOCK_IDS {
+            data.update_sample(clock_id, monotonic, origin, false);
+        }
+        let high = data.basetime[ClockId::CLOCK_REALTIME as usize];
+        let coarse = data.basetime[ClockId::CLOCK_REALTIME_COARSE as usize];
+        assert_eq!(
+            (high.secs, high.nanos_info >> data.shift),
+            (1_700_000_013, 200_000_000)
+        );
+        assert_eq!(
+            (coarse.secs, coarse.nanos_info),
+            (1_700_000_013, 200_000_000)
+        );
+        let before = data.basetime[ClockId::CLOCK_MONOTONIC as usize];
+        data.restamp_realtime(Duration::new(1_600_000_000, 400_000_000));
+        let after = data.basetime[ClockId::CLOCK_MONOTONIC as usize];
+        assert_eq!(
+            (after.secs, after.nanos_info),
+            (before.secs, before.nanos_info)
+        );
+        assert_eq!(data.last_cycles, 123);
+        let high = data.basetime[ClockId::CLOCK_REALTIME as usize];
+        let coarse = data.basetime[ClockId::CLOCK_REALTIME_COARSE as usize];
+        assert_eq!(
+            (high.secs, high.nanos_info >> data.shift),
+            (1_600_000_013, 300_000_000)
+        );
+        assert_eq!(
+            (coarse.secs, coarse.nanos_info),
+            (1_600_000_013, 300_000_000)
+        );
+    }
+}
+// K1 MUSE Book ---

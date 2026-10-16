@@ -170,6 +170,15 @@ dependencies = [
  "inventory",
  "io-util",
  "jhash",
+ "k1-musebook-cpufreq",
+ "k1-musebook-drm",
+ "k1-musebook-gpio",
+ "k1-musebook-i2c",
+ "k1-musebook-pinctrl",
+ "k1-musebook-power",
+ "k1-musebook-pvr",
+ "k1-musebook-thermal",
+ "k1-musebook-usb",
  "keyable-arc",
  "lending-iterator",
  "logo-ascii-art",
@@ -235,10 +244,15 @@ name = "aster-framebuffer"
 version = "0.1.0"
 dependencies = [
  "align_ext",
+ "aster-cmdline",
+ "aster-softirq",
  "bitflags 1.3.2",
  "component",
  "font8x8",
  "int-to-c-enum",
+ "k1-musebook-drm",
+ "k1-musebook-i2c",
+ "k1-musebook-pinctrl",
  "ostd",
  "spin",
 ]
@@ -409,11 +423,13 @@ dependencies = [
 name = "aster-time"
 version = "0.1.0"
 dependencies = [
+ "aster-cmdline",
  "aster-util",
  "bitflags 1.3.2",
  "chrono",
  "component",
  "fdt-util",
+ "k1-musebook-i2c",
  "ostd",
  "spin",
 ]
@@ -429,6 +445,7 @@ dependencies = [
  "fdt-util",
  "inherit-methods-macro",
  "ostd",
+ "sbi-rt",
  "spin",
 ]
 
@@ -1108,6 +1125,127 @@ name = "json"
 version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "078e285eafdfb6c4b434e0d31e8cfcb5115b651496faca5749b88fafd4f23bfd"
+
+[[package]]
+name = "k1-musebook-cpufreq"
+version = "0.1.0"
+dependencies = [
+ "aster-cmdline",
+ "component",
+ "k1-musebook-i2c",
+ "k1-musebook-thermal",
+ "log",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "k1-musebook-drm"
+version = "0.1.0"
+dependencies = [
+ "aster-softirq",
+ "bitflags 1.3.2",
+ "component",
+ "ostd",
+ "ostd-pod",
+ "spin",
+ "zerocopy",
+]
+
+[[package]]
+name = "k1-musebook-gpio"
+version = "0.1.0"
+dependencies = [
+ "component",
+ "k1-musebook-pinctrl",
+ "log",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "k1-musebook-i2c"
+version = "0.1.0"
+dependencies = [
+ "aster-cmdline",
+ "aster-input",
+ "aster-softirq",
+ "component",
+ "k1-musebook-gpio",
+ "k1-musebook-pinctrl",
+ "log",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "k1-musebook-pinctrl"
+version = "0.1.0"
+dependencies = [
+ "component",
+ "log",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "k1-musebook-power"
+version = "0.1.0"
+dependencies = [
+ "aster-cmdline",
+ "component",
+ "k1-musebook-i2c",
+ "log",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "k1-musebook-pvr"
+version = "0.1.0"
+dependencies = [
+ "aster-cmdline",
+ "aster-softirq",
+ "bitflags 1.3.2",
+ "component",
+ "id-alloc",
+ "k1-musebook-drm",
+ "ostd",
+ "ostd-pod",
+ "spin",
+ "zerocopy",
+]
+
+[[package]]
+name = "k1-musebook-thermal"
+version = "0.1.0"
+dependencies = [
+ "aster-cmdline",
+ "component",
+ "k1-musebook-i2c",
+ "log",
+ "ostd",
+ "spin",
+]
+
+[[package]]
+name = "k1-musebook-usb"
+version = "0.1.0"
+dependencies = [
+ "aster-block",
+ "aster-cmdline",
+ "aster-input",
+ "aster-pci",
+ "aster-softirq",
+ "aster-util",
+ "component",
+ "device-id",
+ "io-util",
+ "k1-musebook-gpio",
+ "log",
+ "ostd",
+ "spin",
+]
 
 [[package]]
 name = "keyable-arc"

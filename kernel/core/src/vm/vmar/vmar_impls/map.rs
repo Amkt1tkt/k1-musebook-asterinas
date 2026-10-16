@@ -350,7 +350,10 @@ impl<'a, 'b> VmarMapOptions<'a, 'b> {
                 (mapped_mem, None)
             }
             Some(MappableObject::Device(mappable)) => {
-                if !map_mode.is_shared() {
+                // K1 MUSE Book --- (GEM supplies private COW; MMIO still rejects it)
+                // if !map_mode.is_shared() {
+                if !map_mode.is_shared() && !mappable.supports_private_mapping() {
+                    // K1 MUSE Book ---
                     return_errno_with_message!(
                         Errno::EINVAL,
                         "private device mappings are not yet supported"

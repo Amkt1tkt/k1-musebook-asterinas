@@ -15,6 +15,33 @@
     <br/>
 </p>
 
+<!-- K1 MUSE Book --- (this fork carries the SpacemiT K1 MUSE Book laptop port) -->
+## K1 MUSE Book port
+
+This repository is a downstream fork of Asterinas that boots on the
+**SpacemiT K1 MUSE Book** (8× X60 RISC-V, 16 GiB, NVMe, eDP panel,
+PowerVR BXE-2-32) and runs a NixOS userland with the COSMIC desktop.
+Everything board-specific lives in a few places so that upstream can be
+merged regularly:
+
+* `kernel/core/comps/k1-musebook/*` — new board drivers (`pinctrl`, `gpio`,
+  `i2c`, `power`, `thermal`, `cpufreq`, `usb`, `drm`, `pvr`).
+* `distro/etc_nixos/` — the NixOS root filesystem configuration.
+* Changes to upstream files use `K1 MUSE Book` comment fences appropriate
+  to the source language. Replaced upstream lines remain as commented context.
+
+Build the board kernel with the explicit `k1` OSDK scheme; the generic
+RISC-V scheme retains QEMU's load address. The board userland configuration
+is [`configuration_k1_minimal.nix`](distro/etc_nixos/configuration_k1_minimal.nix),
+built against nixpkgs commit
+[`c0bebd16e69e631ac6e52d6eb439daba28ac50cd`](https://github.com/NixOS/nixpkgs/commit/c0bebd16e69e631ac6e52d6eb439daba28ac50cd).
+The `builtins.fetchTarball` SHA-256 for the GitHub commit archive is
+`1fbhkqm8cnsxszw4d4g0402vwsi75yazxkpfx3rdvln4n6s68saf`.
+This userspace pin is independent of the upstream kernel revision. Boot firmware
+and the device tree are maintained outside this repository. The per-file rationale is indexed
+in [Upstream differences](UPSTREAM-DIFFERENCES.md).
+<!-- K1 MUSE Book --- -->
+
 **News:**
 - 2026-10-13: Asterinas 0.19.0 is released, adding a DRM graphics subsystem, AArch64 as the fourth supported architecture, a Rust-native device model (`aster-device`), better guest-kernel support for secure containers, and the first self-hosted build of Asterinas on Asterinas NixOS. Read the [announcement](https://asterinas.github.io/2026/10/13/announcing-asterinas-0.19.0.html).
 

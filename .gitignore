@@ -47,5 +47,18 @@ cachix.list
 # temporary configuration file for NixOS tests
 distro/etc_nixos/_config_for_test.nix
 
+# K1 MUSE Book --- (board build outputs, rootfs staging, cargo vendor trees)
+rootfs/
+rootfs-old/
+aster-initramfs.cpio.gz
+aster-kernel.bin
+aster-rootfs.ext2
+busybox
+__pycache__/
+*.pyc
+# cargo vendor/ for logind-shim / upower-shim (Nix cannot fetch crates.io)
+distro/etc_nixos/packages/*/vendor/
+# K1 MUSE Book ---
+
 # RustRover
 .idea

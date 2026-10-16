@@ -23,7 +23,12 @@ bitflags! {
         const MSG_ZEROCOPY  = 0x4000000;
         const MSG_FASTOPEN  = 0x20000000;
 
-        const SUPPORTED     = 0x0;
+        // K1 MUSE Book --- (MSG_DONTWAIT is honored by every send path via `block_on_unless`;
+        // MSG_NOSIGNAL is a no-op because no send path raises SIGPIPE on EPIPE yet, so
+        // its semantics hold by construction)
+        //         const SUPPORTED     = 0x0;
+        const SUPPORTED     = Self::MSG_DONTWAIT.bits | Self::MSG_NOSIGNAL.bits;
+        // K1 MUSE Book ---
     }
 }
 
@@ -31,6 +36,13 @@ impl SendFlags {
     pub(crate) const fn is_all_supported(self) -> bool {
         Self::SUPPORTED.contains(self)
     }
+
+    // K1 MUSE Book --- (MSG_DONTWAIT)
+    /// Whether this operation requests nonblocking I/O independently of the fd.
+    pub(crate) const fn dont_wait(self) -> bool {
+        self.contains(Self::MSG_DONTWAIT)
+    }
+    // K1 MUSE Book ---
 }
 
 bitflags! {
@@ -50,7 +62,11 @@ bitflags! {
         const MSG_SOCK_DEVMEM  = 0x2000000;
         const MSG_CMSG_CLOEXEC = 0x40000000;
 
-        const SUPPORTED        = RecvFlags::MSG_PEEK.bits | RecvFlags::MSG_TRUNC.bits;
+        // K1 MUSE Book --- (MSG_DONTWAIT is honored by every receive path via `block_on_unless`;
+        // MSG_CMSG_CLOEXEC is honored when SCM_RIGHTS fds are installed, see `fd_flags`)
+        //         const SUPPORTED        = RecvFlags::MSG_PEEK.bits | RecvFlags::MSG_TRUNC.bits;
+        const SUPPORTED        = RecvFlags::MSG_PEEK.bits | RecvFlags::MSG_TRUNC.bits | RecvFlags::MSG_DONTWAIT.bits | RecvFlags::MSG_CMSG_CLOEXEC.bits;
+        // K1 MUSE Book ---
     }
 }
 
@@ -58,6 +74,26 @@ impl RecvFlags {
     pub(crate) const fn is_all_supported(self) -> bool {
         Self::SUPPORTED.contains(self)
     }
+
+    // K1 MUSE Book --- (MSG_DONTWAIT)
+    /// Whether this operation requests nonblocking I/O independently of the fd.
+    pub(crate) const fn dont_wait(self) -> bool {
+        self.contains(Self::MSG_DONTWAIT)
+    }
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (MSG_CMSG_CLOEXEC)
+    /// The `FdFlags` for file descriptors installed from a received
+    /// `SCM_RIGHTS` message: `CLOEXEC` iff `MSG_CMSG_CLOEXEC` was passed.
+    pub(crate) fn fd_flags(self) -> crate::fs::file::file_table::FdFlags {
+        use crate::fs::file::file_table::FdFlags;
+        if self.contains(Self::MSG_CMSG_CLOEXEC) {
+            FdFlags::CLOEXEC
+        } else {
+            FdFlags::empty()
+        }
+    }
+    // K1 MUSE Book ---
 
     /// Returns whether receive operations should consume or peek data.
     pub(crate) fn receive_behavior(self) -> ReceiveBehavior {

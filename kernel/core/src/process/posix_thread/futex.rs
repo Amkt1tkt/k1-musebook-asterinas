@@ -164,10 +164,16 @@ pub(crate) fn futex_wake_bitset(
 
     let futex_key = FutexKey::new(futex_addr, bitset, &current_userspace!(), visibility)?;
     let (_, futex_bucket_ref) = get_futex_bucket(&futex_key);
-    let mut futex_bucket = futex_bucket_ref.lock();
-    let res = futex_bucket.remove_and_wake_items(&futex_key, max_count);
-
-    Ok(res)
+    // K1 MUSE Book --- (dequeue matching waiters even if already signalled; unpark after dropping the bucket lock)
+    // let mut futex_bucket = futex_bucket_ref.lock();
+    // let res = futex_bucket.remove_and_wake_items(&futex_key, max_count);
+    //
+    // Ok(res)
+    let wakers = futex_bucket_ref
+        .lock()
+        .remove_matching_wakers(&futex_key, max_count);
+    Ok(wake_wakers(wakers))
+    // K1 MUSE Book ---
 }
 
 /// This struct encodes the operation and comparison that are to be performed during
@@ -333,13 +339,23 @@ pub(crate) fn futex_wake_op(
             })?;
     };
 
-    let mut res = futex_bucket_1.remove_and_wake_items(&futex_key_1, max_count_1);
+    // K1 MUSE Book --- (never unpark while holding either futex bucket)
+    // let mut res = futex_bucket_1.remove_and_wake_items(&futex_key_1, max_count_1);
+    // if wake_op.should_wake(old_val) {
+    //     let bucket = futex_bucket_2.as_mut().unwrap_or(&mut futex_bucket_1);
+    //     res += bucket.remove_and_wake_items(&futex_key_2, max_count_2);
+    // }
+    // Ok(res)
+    let mut wakers = futex_bucket_1.remove_matching_wakers(&futex_key_1, max_count_1);
     if wake_op.should_wake(old_val) {
         let bucket = futex_bucket_2.as_mut().unwrap_or(&mut futex_bucket_1);
-        res += bucket.remove_and_wake_items(&futex_key_2, max_count_2);
+        wakers.extend(bucket.remove_matching_wakers(&futex_key_2, max_count_2));
     }
+    drop(futex_bucket_2);
+    drop(futex_bucket_1);
 
-    Ok(res)
+    Ok(wake_wakers(wakers))
+    // K1 MUSE Book ---
 }
 
 pub(crate) fn futex_requeue(
@@ -363,22 +379,42 @@ pub(crate) fn futex_requeue(
         visibility,
     )?;
 
-    let (mut futex_bucket, futex_new_bucket) = lock_bucket_pairs(&futex_key, &futex_new_key);
+    // K1 MUSE Book --- (finish requeueing before unparking any selected waiter)
+    // let (mut futex_bucket, futex_new_bucket) = lock_bucket_pairs(&futex_key, &futex_new_key);
+    //
+    // let nwakes = futex_bucket.remove_and_wake_items(&futex_key, max_nwakes);
+    //
+    // if let Some(mut futex_new_bucket) = futex_new_bucket {
+    //     futex_bucket.requeue_items_to_another_bucket(
+    //         &futex_key,
+    //         &mut futex_new_bucket,
+    //         &futex_new_key,
+    //         max_nrequeues,
+    //     );
+    // } else {
+    //     futex_bucket.update_item_keys(&futex_key, &futex_new_key, max_nrequeues);
+    // }
+    //
+    // Ok(nwakes)
+    let wakers = {
+        let (mut futex_bucket, futex_new_bucket) = lock_bucket_pairs(&futex_key, &futex_new_key);
+        let wakers = futex_bucket.remove_matching_wakers(&futex_key, max_nwakes);
 
-    let nwakes = futex_bucket.remove_and_wake_items(&futex_key, max_nwakes);
+        if let Some(mut futex_new_bucket) = futex_new_bucket {
+            futex_bucket.requeue_items_to_another_bucket(
+                &futex_key,
+                &mut futex_new_bucket,
+                &futex_new_key,
+                max_nrequeues,
+            );
+        } else {
+            futex_bucket.update_item_keys(&futex_key, &futex_new_key, max_nrequeues);
+        }
+        wakers
+    };
 
-    if let Some(mut futex_new_bucket) = futex_new_bucket {
-        futex_bucket.requeue_items_to_another_bucket(
-            &futex_key,
-            &mut futex_new_bucket,
-            &futex_new_key,
-            max_nrequeues,
-        );
-    } else {
-        futex_bucket.update_item_keys(&futex_key, &futex_new_key, max_nrequeues);
-    }
-
-    Ok(nwakes)
+    Ok(wake_wakers(wakers))
+    // K1 MUSE Book ---
 }
 
 static FUTEX_BUCKETS: Once<FutexBucketVec> = Once::new();
@@ -482,22 +518,53 @@ impl FutexBucket {
         Some(self.items.swap_remove(idx))
     }
 
-    pub(self) fn remove_and_wake_items(&mut self, key: &FutexKey, max_count: usize) -> usize {
-        let mut count = 0;
+    // K1 MUSE Book --- (dequeue under the bucket lock; unpark after releasing it)
+    // pub(self) fn remove_and_wake_items(&mut self, key: &FutexKey, max_count: usize) -> usize {
+    //     let mut count = 0;
+    //
+    //     self.items.retain(|item| {
+    //         if item.key.match_up(key) && count < max_count && item.wake() {
+    //             count += 1;
+    //             false
+    //         } else {
+    //             true
+    //         }
+    //     });
+    //
+    //     count
+    // }
+    // K1 MUSE Book ---
 
+    // K1 MUSE Book --- (WAKE dequeues matching waiters even if already signalled)
+    /// Dequeues up to `max_count` waiters whose key matches, without waking
+    /// them. The caller must drop the bucket lock and then call [`wake_wakers`].
+    ///
+    /// Matching waiters are always removed, even if `Waker::wake_up` would
+    /// return `false` (already signalled / timed out).
+    pub(self) fn remove_matching_wakers(
+        &mut self,
+        key: &FutexKey,
+        max_count: usize,
+    ) -> Vec<Arc<Waker>> {
+        let mut wakers = Vec::new();
         self.items.retain(|item| {
-            if item.key.match_up(key) && count < max_count && item.wake() {
-                count += 1;
-                false
-            } else {
+            if wakers.len() >= max_count || !item.key.match_up(key) {
                 true
+            } else {
+                wakers.push(item.waker.clone());
+                false
             }
         });
-
-        count
+        wakers
     }
+    // K1 MUSE Book ---
 
     pub(self) fn update_item_keys(&mut self, key: &FutexKey, new_key: &FutexKey, max_count: usize) {
+        // K1 MUSE Book --- (a zero requeue limit must leave the bucket unchanged)
+        if max_count == 0 {
+            return;
+        }
+        // K1 MUSE Book ---
         let mut count = 0;
         for item in self.items.iter_mut() {
             if item.key.match_up(key) {
@@ -547,11 +614,23 @@ impl FutexItem {
         (futex_item, waiter)
     }
 
-    #[must_use]
-    pub(self) fn wake(&self) -> bool {
-        self.waker.wake_up()
-    }
+    // K1 MUSE Book --- (WAKE now dequeues then unparks; wake() is unused)
+    // #[must_use]
+    // pub(self) fn wake(&self) -> bool {
+    //     self.waker.wake_up()
+    // }
+    // K1 MUSE Book ---
 }
+
+// K1 MUSE Book --- (unpark after the bucket lock is dropped)
+fn wake_wakers(wakers: Vec<Arc<Waker>>) -> usize {
+    let n = wakers.len();
+    for waker in wakers {
+        let _ = waker.wake_up();
+    }
+    n
+}
+// K1 MUSE Book ---
 
 /// The identity used for futex namespace and backing selection.
 #[derive(Clone, Debug)]
@@ -730,3 +809,66 @@ pub(crate) fn futex_op_and_flags_from_u32(bits: u32) -> Result<(FutexOp, FutexFl
 
     Ok((op, flags))
 }
+
+// K1 MUSE Book --- (dequeue and requeue limit regressions)
+#[cfg(ktest)]
+mod wake_tests {
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    fn key(offset: usize, bitset: u32) -> FutexKey {
+        FutexKey {
+            hash: offset,
+            identity: FutexIdentity::Shared {
+                vmo: Weak::new(),
+                offset,
+            },
+            bitset,
+        }
+    }
+
+    #[ktest]
+    fn a_signalled_waiter_does_not_block_dequeue_of_its_futex_item() {
+        let selected = key(0, 1);
+        let other = key(PAGE_SIZE, 1);
+        let (signalled, completed) = FutexItem::create(selected.clone());
+        let (pending, pending_waiter) = FutexItem::create(selected.clone());
+        let (unrelated, unrelated_waiter) = FutexItem::create(other.clone());
+        assert!(completed.waker().wake_up());
+        let mut bucket = FutexBucket::new();
+        bucket.add_item(signalled);
+        bucket.add_item(pending);
+        bucket.add_item(unrelated);
+        let first = bucket.remove_matching_wakers(&selected, 1);
+        assert_eq!(wake_wakers(first), 1);
+        assert!(bucket.remove_by_waker(&completed.waker()).is_none());
+        assert_eq!(
+            wake_wakers(bucket.remove_matching_wakers(&selected, usize::MAX)),
+            1
+        );
+        assert!(bucket.remove_by_waker(&pending_waiter.waker()).is_none());
+        assert!(bucket.remove_by_waker(&unrelated_waiter.waker()).is_some());
+    }
+
+    #[ktest]
+    fn a_zero_same_bucket_requeue_limit_does_not_move_a_waiter() {
+        let source = key(0, 1);
+        let destination = key(PAGE_SIZE, 1);
+        let (item, waiter) = FutexItem::create(source.clone());
+        let mut bucket = FutexBucket::new();
+        bucket.add_item(item);
+        bucket.update_item_keys(&source, &destination, 0);
+        assert!(
+            bucket
+                .remove_matching_wakers(&destination, usize::MAX)
+                .is_empty()
+        );
+        assert_eq!(
+            wake_wakers(bucket.remove_matching_wakers(&source, usize::MAX)),
+            1
+        );
+        assert!(bucket.remove_by_waker(&waiter.waker()).is_none());
+    }
+}
+// K1 MUSE Book ---

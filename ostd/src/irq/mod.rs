@@ -79,8 +79,11 @@ mod top_half;
 pub use bottom_half::{register_bottom_half_handler_l1, register_bottom_half_handler_l2};
 pub use guard::{DisabledLocalIrqGuard, disable_local};
 pub use level::InterruptLevel;
-pub use top_half::{IrqCallbackFunction, IrqLine};
+// K1 MUSE Book --- (MSI demux for the K1 PCIe RC FIFO)
+// pub use top_half::{IrqCallbackFunction, IrqLine};
+pub use top_half::{IrqCallbackFunction, IrqLine, process_msi};
 
+// K1 MUSE Book ---
 use crate::{
     arch::{irq::HwIrqLine, trap::TrapFrame},
     cpu::PrivilegeLevel,

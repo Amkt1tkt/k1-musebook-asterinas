@@ -870,3 +870,96 @@ inherit_sys_leaf_node!(EmptyNode, fields, {
         Err(Error::NotFound)
     }
 });
+
+// K1 MUSE Book --- (DirNode / SymlinkNode helpers for the sysfs device model)
+/// A plain directory node in the `SysTree`.
+///
+/// A directory node carries no attributes of its own. It exists only to give the
+/// tree a level, the way the kobjects behind `/sys/devices` and `/sys/dev/char`
+/// do in Linux: they hold nothing but their children.
+#[derive(Debug)]
+pub struct DirNode {
+    fields: AttrLessBranchNodeFields<dyn SysObj, Self>,
+}
+
+impl DirNode {
+    /// Creates a new, empty directory node.
+    pub fn new(name: SysStr) -> Arc<Self> {
+        Arc::new_cyclic(|weak_self| Self {
+            fields: AttrLessBranchNodeFields::new(name, weak_self.clone()),
+        })
+    }
+
+    /// Returns an `Arc` referring to this node.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the node is being dropped.
+    pub fn this(&self) -> Arc<Self> {
+        self.fields
+            .weak_self()
+            .upgrade()
+            .expect("the `DirNode` is being dropped")
+    }
+
+    /// Adds a child node to this directory.
+    pub fn add_child(&self, new_child: Arc<dyn SysObj>) -> Result<()> {
+        self.fields.add_child(new_child)
+    }
+
+    /// Removes the child node with the given name, returning it.
+    pub fn remove_child(&self, name: &str) -> Result<Arc<dyn SysObj>> {
+        self.fields.remove_child(name)
+    }
+
+    /// Returns the child directory with the given name.
+    ///
+    /// Returns `None` if no child of that name exists, or if it exists but is not
+    /// itself a directory node.
+    pub fn child_dir(&self, name: &str) -> Option<Arc<Self>> {
+        let child = self.fields.child(name)?;
+        Some(child.as_any().downcast_ref::<Self>()?.this())
+    }
+
+    /// Returns the child directory with the given name, creating it if absent.
+    pub fn get_or_create_dir(&self, name: SysStr) -> Result<Arc<Self>> {
+        if let Some(existing) = self.child_dir(&name) {
+            return Ok(existing);
+        }
+
+        let new_dir = Self::new(name);
+        match self.add_child(new_dir.clone()) {
+            Ok(()) => Ok(new_dir),
+            Err(Error::AlreadyExists) => self.child_dir(new_dir.name()).ok_or(Error::AlreadyExists),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+inherit_sys_branch_node!(DirNode, fields, {
+    fn perms(&self) -> crate::SysPerms {
+        crate::SysPerms::DEFAULT_RO_PERMS
+    }
+});
+
+/// A symbolic link node in the `SysTree`.
+///
+/// The target is an uninterpreted string, exactly as in Linux sysfs: it is
+/// resolved by the file system layer when user space follows the link, not when
+/// the link is created.
+#[derive(Debug)]
+pub struct SymlinkNode {
+    fields: SymlinkNodeFields<Self>,
+}
+
+impl SymlinkNode {
+    /// Creates a new symbolic link node pointing at `target_path`.
+    pub fn new(name: SysStr, target_path: String) -> Arc<Self> {
+        Arc::new_cyclic(|weak_self| Self {
+            fields: SymlinkNodeFields::new(name, target_path, weak_self.clone()),
+        })
+    }
+}
+
+inherit_sys_symlink_node!(SymlinkNode, fields);
+// K1 MUSE Book ---

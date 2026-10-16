@@ -36,6 +36,11 @@
 //! it does not require a connection to be established before sending messages.
 //! The destination address must be specified when dispatching a message.
 //!
+// K1 MUSE Book --- (libudev uevent monitor compatibility)
+//! `NETLINK_KOBJECT_UEVENT` accepts attachment and detachment of unevaluated
+//! cBPF filters for libudev initialization. Only instruction count and buffer
+//! accessibility are checked. Other protocols retain `ENOPROTOOPT`.
+// K1 MUSE Book ---
 
 mod addr;
 mod common;

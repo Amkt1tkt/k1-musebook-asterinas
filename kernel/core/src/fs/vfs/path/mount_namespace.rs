@@ -250,21 +250,58 @@ impl MountNamespace {
 
     /// Flushes all pending filesystem metadata and cached file data to the device
     /// for all mounted filesystems in this mount namespace.
+    // K1 MUSE Book --- (share the upstream mount walk with ordered shutdown)
+    // pub(crate) fn sync(&self) -> Result<()> {
+    //     let mut visited_filesystems = hashbrown::HashSet::new();
+    //
+    //     self.root().try_walk_tree(|current_mount| {
+    //         let fs_ptr = Arc::as_ptr(current_mount.fs());
+    //         // Only sync each filesystem once.
+    //         if visited_filesystems.insert(fs_ptr) {
+    //             current_mount.sync()?;
+    //         }
+    //
+    //         Ok(())
+    //     })?;
+    //
+    //     Ok(())
+    // }
     pub(crate) fn sync(&self) -> Result<()> {
-        let mut visited_filesystems = hashbrown::HashSet::new();
+        self.for_each_fs_once(|mount| mount.sync())
+    }
 
-        self.root().try_walk_tree(|current_mount| {
-            let fs_ptr = Arc::as_ptr(current_mount.fs());
-            // Only sync each filesystem once.
-            if visited_filesystems.insert(fs_ptr) {
-                current_mount.sync()?;
+    /// Syncs every file system for shutdown, retaining the first error.
+    /// A failure must not prevent the remaining file systems from being flushed.
+    pub(crate) fn sync_for_shutdown(&self) -> Result<()> {
+        let mut first_err = None;
+        self.for_each_fs_once(|mount| {
+            if let Err(err) = mount.sync_for_shutdown() {
+                error!(
+                    "[reboot] {} on {:?}: shutdown sync failed: {:?}",
+                    mount.fs().name(),
+                    mount.fs().source(),
+                    err
+                );
+                first_err.get_or_insert(err);
             }
-
             Ok(())
         })?;
-
-        Ok(())
+        match first_err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
+
+    fn for_each_fs_once(&self, mut f: impl FnMut(&Arc<Mount>) -> Result<()>) -> Result<()> {
+        let mut visited_filesystems = hashbrown::HashSet::new();
+        self.root().try_walk_tree(|mount| {
+            if visited_filesystems.insert(Arc::as_ptr(mount.fs())) {
+                f(&mount)?;
+            }
+            Ok(())
+        })
+    }
+    // K1 MUSE Book ---
 
     /// Checks whether a given mount belongs to this mount namespace.
     pub(crate) fn owns(self: &Arc<Self>, mount: &Mount) -> bool {

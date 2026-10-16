@@ -41,7 +41,14 @@ impl<'a, G: PinCurrentCpu> TlbFlusher<'a, G> {
             target_cpus,
             pending_ipis: PendingIpis::new_empty(),
             ops_stack: OpsStack::new(),
-            ipi_sender: crate::smp::IPI_SENDER.get(),
+            // K1 MUSE Book --- (do not wait for TLB ACKs from APs still in the wait loop)
+            // ipi_sender: crate::smp::IPI_SENDER.get(),
+            ipi_sender: if crate::smp::aps_online() {
+                crate::smp::IPI_SENDER.get()
+            } else {
+                None
+            },
+            // K1 MUSE Book ---
             _pin_current: pin_current_guard,
         }
     }

@@ -6,10 +6,20 @@
   ...
 }:
 let
-  kernel = builtins.path {
-    name = "asterinas-osdk-bin";
-    path = config.aster_nixos.kernel;
-  };
+  # K1 MUSE Book --- (kernel is a GPT partition on K1, not in this closure)
+  # kernel = builtins.path {
+  #   name = "asterinas-osdk-bin";
+  #   path = config.aster_nixos.kernel;
+  # };
+  kernel =
+    if config.aster_nixos.kernel == null then
+      null
+    else
+      builtins.path {
+        name = "asterinas-osdk-bin";
+        path = config.aster_nixos.kernel;
+      };
+  # K1 MUSE Book ---
   stage-1-init = pkgs.writeShellScript "stage-1-init" ''
     #!/bin/sh
     # SPDX-License-Identifier: MPL-2.0
@@ -70,7 +80,18 @@ let
         object = stage-1-init;
         symlink = "/init";
       }
-    ];
+    # K1 MUSE Book --- (firmware is loaded before switch_root; GPU blob must be in the initrd)
+    # ];
+    ]
+    # `kernel/.../firmware.rs` reads `/lib/firmware/<name>` from the first
+    # kernel thread, before stage-1 mounts the real root. Rootfs copies in
+    # `modules/gpu.nix` are invisible at that moment. Guarded on the package
+    # existing so this boot-critical module does not require the GPU overlay.
+    ++ lib.optional (pkgs ? powervr-firmware) {
+      object = "${pkgs.powervr-firmware}/lib/firmware";
+      symlink = "/lib/firmware";
+    };
+    # K1 MUSE Book ---
   };
 in
 {
@@ -107,7 +128,11 @@ in
       sed -i 's/^[[:space:]]*echo "starting systemd..."$/# &/' $out/init
       sed -i 's/^[[:space:]]*exec \/run\/current-system\/systemd\/lib\/systemd\/systemd "$@"$/# &/' $out/init
     fi
-    ln -s ${kernel} $out/kernel
+    # K1 MUSE Book --- (no kernel in the closure when aster_nixos.kernel is null)
+    # A '#' line is still Nix-interpolated; ''${ keeps the original as text.
+    # ln -s ''${kernel} $out/kernel
+    ${lib.optionalString (kernel != null) "ln -s ${kernel} $out/kernel"}
+    # K1 MUSE Book ---
     ln -s ${initramfs}/initrd $out/initrd
   '';
   system.activationScripts.modprobe = lib.mkForce "";

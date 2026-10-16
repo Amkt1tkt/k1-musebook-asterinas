@@ -135,11 +135,16 @@ impl CUserMsgHdr {
         Ok(control_messages)
     }
 
+    // K1 MUSE Book --- (MSG_CMSG_CLOEXEC: `recv_flags` decides the installed fds' `FdFlags`)
+    // K1 MUSE Book --- (preserve received descriptor flags and report control truncation)
+    //         let (write_len, output_flags) = ControlMessage::write_all_to(control_messages, &mut writer);
     pub(crate) fn write_control_messages_to_user(
         &self,
         control_messages: &[ControlMessage],
+        recv_flags: RecvFlags,
         user_space: &CurrentUserSpace,
     ) -> Result<(u32, RecvFlags)> {
+        // K1 MUSE Book ---
         if self.msg_control == 0 {
             // The length field will be set even if the control message pointer is NULL.
             // See <https://elixir.bootlin.com/linux/v6.15.6/source/net/socket.c#L2807>.
@@ -152,9 +157,11 @@ impl CUserMsgHdr {
         }
 
         let mut writer = user_space.writer(self.msg_control, self.msg_controllen)?;
-        let (write_len, output_flags) = ControlMessage::write_all_to(control_messages, &mut writer);
+        let (write_len, output_flags) =
+            ControlMessage::write_all_to(control_messages, &mut writer, recv_flags);
         Ok((write_len as u32, output_flags))
     }
+    // K1 MUSE Book ---
 
     pub(crate) fn copy_reader_array_from_user<'a>(
         &self,

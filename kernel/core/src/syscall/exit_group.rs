@@ -14,6 +14,9 @@ pub(super) fn sys_exit_group(
     ctx: &Context,
     user_ctx: &mut UserContext,
 ) -> Result<SyscallReturn> {
+    // K1 MUSE Book --- (k1.diag=proc / k1.diag=stderr: non-zero exit_group + flush tee)
+    super::proc_diag::note_exit(ctx, "exit_group", exit_code as i32);
+    // K1 MUSE Book ---
     // Exit all thread in current process
     let term_status = TermStatus::Exited(exit_code as _);
     do_exit_group(term_status, ctx, user_ctx);

@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: independent host-side PowerVR generator.
+# Excluded from the parent workspace by this empty table, since it sits inside the
+# `k1-musebook-pvr` package directory and must build for the host, not the kernel target.
+[workspace]
+
+[package]
+name = "pvr-regen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MPL-2.0"
+
+# Host-side generator that turns upstream's register and firmware-interface
+# headers into the Rust in `../src/rogue/`.
+#
+# Excluded from the kernel workspace: this runs on the developer's machine, not
+# during a kernel build, and its output is committed. Deliberately has no
+# dependencies -- the headers it reads are regular enough that a hand-written
+# parser is smaller and more predictable than bindgen, and it must not become a
+# build-time requirement for anyone building the kernel.
+
+[lib]
+name = "pvr_regen"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pvr-regen"
+path = "src/main.rs"
+
+[dependencies]

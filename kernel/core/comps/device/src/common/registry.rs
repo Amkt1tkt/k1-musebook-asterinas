@@ -45,6 +45,12 @@ impl Registry {
         &self.devices
     }
 
+    // K1 MUSE Book --- (register auxiliary virtual classes without exporting root internals)
+    pub(crate) fn virtual_root(&self) -> &Arc<Dir> {
+        &self.virtual_dir
+    }
+    // K1 MUSE Book ---
+
     pub(crate) fn bus_root(&self) -> &Arc<Dir> {
         &self.bus
     }

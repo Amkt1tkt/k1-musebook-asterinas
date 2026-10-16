@@ -88,7 +88,26 @@ impl<E: Events, F: EventsFilter<E>> SyncSubject<E, F> {
     ///
     /// If the given observer has already been registered, then its registered events
     /// filter will be updated.
-    pub(crate) fn register_observer(&self, observer: Weak<dyn Observer<E>>, filter: F) {
+    // K1 MUSE Book --- (return whether the observer was newly registered so pollers do not record the same registration twice)
+    // pub(crate) fn register_observer(&self, observer: Weak<dyn Observer<E>>, filter: F) {
+    //     let mut observers = self.observers.lock();
+    //     let is_new = {
+    //         let observer: KeyableWeak<dyn Observer<E>> = observer.into();
+    //         observers.insert(observer, filter).is_none()
+    //     };
+    //     if is_new {
+    //         // This `Acquire` pairs with the `Release` in `notify_observers`.
+    //         self.num_observers.fetch_add(1, Ordering::Acquire);
+    //     }
+    // }
+    ///
+    /// Returns whether the observer was newly registered, as opposed to already
+    /// being present with its filter updated. Callers that keep their own record
+    /// of what they have registered need this to avoid recording the same
+    /// registration twice; see [`Pollee::register_poller`].
+    ///
+    /// [`Pollee::register_poller`]: crate::process::signal::Pollee::register_poller
+    pub(crate) fn register_observer(&self, observer: Weak<dyn Observer<E>>, filter: F) -> bool {
         let mut observers = self.observers.lock();
         let is_new = {
             let observer: KeyableWeak<dyn Observer<E>> = observer.into();
@@ -98,7 +117,9 @@ impl<E: Events, F: EventsFilter<E>> SyncSubject<E, F> {
             // This `Acquire` pairs with the `Release` in `notify_observers`.
             self.num_observers.fetch_add(1, Ordering::Acquire);
         }
+        is_new
     }
+    // K1 MUSE Book ---
 
     /// Unregisters an observer.
     ///

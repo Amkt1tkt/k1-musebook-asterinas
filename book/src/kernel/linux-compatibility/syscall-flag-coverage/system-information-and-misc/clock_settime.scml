@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
+// K1 MUSE Book: realtime setter coverage; authority and valid time ranges are described in README.md.
+
+clock_settime(clockid = CLOCK_REALTIME, tp);

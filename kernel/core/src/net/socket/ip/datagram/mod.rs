@@ -236,10 +236,17 @@ impl Socket for DatagramSocket {
             warn!("unsupported flags: {:?}", flags);
         }
 
-        let (output, peer_addr) =
-            self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
-                self.try_recv(writer, flags)
-            })?;
+        // K1 MUSE Book --- (MSG_DONTWAIT; see `SocketPrivate::block_on_unless`)
+        //         let (output, peer_addr) =
+        //             self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+        //                 self.try_recv(writer, flags)
+        let (output, peer_addr) = self.block_on_unless(
+            flags.dont_wait(),
+            IoEvents::IN,
+            self.timeouts.recv_timeout(),
+            || self.try_recv(writer, flags),
+        )?;
+        // K1 MUSE Book ---
 
         // TODO: Receive control message
 

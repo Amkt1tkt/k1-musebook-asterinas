@@ -207,7 +207,18 @@ fn process_all_pending(mut irq_guard: DisabledLocalIrqGuard) -> DisabledLocalIrq
         //    iterations, or
         // 2. if another task preempts us, where we will want to give it time to run to ensure
         //    fairness.
-        if run_time >= SOFTIRQ_RUN_TIMES || Task::need_yield() {
+        //
+        // K1 MUSE Book --- (always run the first round of softirqs in the bottom half)
+        // Case 2 only applies to *restarts*, as in Linux's `__do_softirq`, which runs the
+        // pending set once unconditionally and consults `need_resched()` only before looping
+        // again. Checking `need_yield()` before the first round hands every softirq raised
+        // while the interrupted task's slice has expired to `softirqd`, a `Fair`-class thread
+        // that then competes with the workload that expired the slice. GPU completion,
+        // DPU vblank, and touchpad draining use `Taskless` softirqs, so deferring their
+        // first round adds scheduling latency to frame and input delivery.
+        // if run_time >= SOFTIRQ_RUN_TIMES || Task::need_yield() {
+        if run_time >= SOFTIRQ_RUN_TIMES || (run_time > 0 && Task::need_yield()) {
+            // K1 MUSE Book ---
             // If this is `None`, the work will be processed when the daemon thread starts up.
             if let Some(waker) = DAEMON_WAKER.get_with(&irq_guard).get() {
                 let _ = waker.wake_up();

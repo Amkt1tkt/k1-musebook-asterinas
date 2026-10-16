@@ -6,7 +6,13 @@ use core::{any::Any, fmt::Debug};
 use ostd::sync::{RwLock, WriteIrqDisabled};
 
 use crate::{
-    event_type_codes::{EventTypes, KeyCode, KeyCodeSet, KeyStatus, RelCode, RelCodeSet, SynEvent},
+    // K1 MUSE Book --- (EV_ABS / EV_SW / INPUT_PROP_* used by the K1 input chain)
+    // event_type_codes::{EventTypes, KeyCode, KeyCodeSet, KeyStatus, RelCode, RelCodeSet, SynEvent},
+    event_type_codes::{
+        AbsCode, AbsCodeSet, AbsInfo, EventTypes, InputProp, InputPropSet, KeyCode, KeyCodeSet,
+        KeyStatus, RelCode, RelCodeSet, SwCode, SwCodeSet, SynEvent,
+    },
+    // K1 MUSE Book ---
     input_handler::BoundInputHandler,
     unregister_device,
 };
@@ -20,7 +26,13 @@ pub enum InputEvent {
     Key(KeyCode, KeyStatus),
     /// Relative movement events (EV_REL)
     Relative(RelCode, i32),
+    // K1 MUSE Book --- (absolute axes and lid/power-key switches)
     // TODO: Add EV_ABS, EV_MSC, EV_SW, EV_LED, EV_SND, ... as needed
+    /// Absolute position events (EV_ABS)
+    Absolute(AbsCode, i32),
+    /// Switch events (EV_SW)
+    Switch(SwCode, bool),
+    // K1 MUSE Book ---
 }
 
 impl InputEvent {
@@ -39,6 +51,18 @@ impl InputEvent {
         Self::Relative(axis, value)
     }
 
+    // K1 MUSE Book --- (constructors for EV_ABS / EV_SW)
+    /// Creates an absolute position event.
+    pub fn from_absolute(axis: AbsCode, value: i32) -> Self {
+        Self::Absolute(axis, value)
+    }
+
+    /// Creates a switch event. `active` is encoded as Linux value 1.
+    pub fn from_switch(sw: SwCode, active: bool) -> Self {
+        Self::Switch(sw, active)
+    }
+    // K1 MUSE Book ---
+
     /// Converts enum to raw Linux input event triplet (type, code, value).
     pub fn to_raw(&self) -> (u16, u16, i32) {
         match self {
@@ -51,6 +75,11 @@ impl InputEvent {
                 (EventTypes::KEY.as_index(), *key as u16, *status as i32)
             }
             InputEvent::Relative(axis, value) => (EventTypes::REL.as_index(), *axis as u16, *value),
+            // K1 MUSE Book --- (EV_ABS / EV_SW raw encoding)
+            InputEvent::Absolute(axis, value) => (EventTypes::ABS.as_index(), *axis as u16, *value),
+            InputEvent::Switch(sw, active) => {
+                (EventTypes::SW.as_index(), *sw as u16, i32::from(*active))
+            } // K1 MUSE Book ---
         }
     }
 
@@ -60,6 +89,10 @@ impl InputEvent {
             InputEvent::Sync(_) => EventTypes::SYN,
             InputEvent::Key(_, _) => EventTypes::KEY,
             InputEvent::Relative(_, _) => EventTypes::REL,
+            // K1 MUSE Book --- (EV_ABS / EV_SW)
+            InputEvent::Absolute(_, _) => EventTypes::ABS,
+            InputEvent::Switch(_, _) => EventTypes::SW,
+            // K1 MUSE Book ---
         }
     }
 }
@@ -143,7 +176,17 @@ pub struct InputCapability {
     supported_keys: KeyCodeSet,
     /// Supported relative axis codes.
     supported_relative_axes: RelCodeSet,
+    // K1 MUSE Book --- (absolute axes, switches, INPUT_PROP_* for evdev ioctls)
     // TODO: Add supported_absolute_axes, supported_misc, etc.
+    /// Supported absolute axis codes.
+    supported_absolute_axes: AbsCodeSet,
+    /// Per-axis `input_absinfo` for `EVIOCGABS`.
+    absinfo: [AbsInfo; crate::event_type_codes::ABS_MAX + 1],
+    /// Supported switch codes.
+    supported_switches: SwCodeSet,
+    /// `INPUT_PROP_*` bits (`EVIOCGPROP`, sysfs `properties`).
+    properties: InputPropSet,
+    // K1 MUSE Book ---
 }
 
 impl Default for InputCapability {
@@ -159,6 +202,12 @@ impl InputCapability {
             supported_event_types: EventTypes::new(),
             supported_keys: KeyCodeSet::new(),
             supported_relative_axes: RelCodeSet::new(),
+            // K1 MUSE Book --- (absolute / switch / property bitmaps)
+            supported_absolute_axes: AbsCodeSet::new(),
+            absinfo: [AbsInfo::default(); crate::event_type_codes::ABS_MAX + 1],
+            supported_switches: SwCodeSet::new(),
+            properties: InputPropSet::new(),
+            // K1 MUSE Book ---
         }
     }
 
@@ -223,6 +272,67 @@ impl InputCapability {
         self.supported_relative_axes.clear(rel_code);
     }
 
+    // K1 MUSE Book --- (ABS / SW / INPUT_PROP capability helpers for evdev)
+
+    /// Sets an absolute axis and its `input_absinfo`.
+    pub fn set_supported_absolute_axis(&mut self, abs_code: AbsCode, info: AbsInfo) {
+        self.supported_absolute_axes.set(abs_code);
+        self.absinfo[abs_code as usize] = info;
+        self.set_supported_event_type(EventTypes::ABS);
+    }
+
+    /// Checks if an absolute axis is supported.
+    pub fn support_absolute_axis(&self, abs_code: AbsCode) -> bool {
+        self.supported_absolute_axes.contain(abs_code)
+    }
+
+    /// Returns `input_absinfo` for `code`, or `None` if the axis is not advertised.
+    pub fn absinfo(&self, abs_code: AbsCode) -> Option<AbsInfo> {
+        if self.support_absolute_axis(abs_code) {
+            Some(self.absinfo[abs_code as usize])
+        } else {
+            None
+        }
+    }
+
+    /// Sets a switch capability.
+    pub fn set_supported_switch(&mut self, sw_code: SwCode) {
+        self.supported_switches.set(sw_code);
+        self.set_supported_event_type(EventTypes::SW);
+    }
+
+    /// Checks if a switch is supported.
+    pub fn support_switch(&self, sw_code: SwCode) -> bool {
+        self.supported_switches.contain(sw_code)
+    }
+
+    /// Sets an `INPUT_PROP_*` bit.
+    pub fn set_property(&mut self, prop: InputProp) {
+        self.properties.set(prop);
+    }
+
+    /// Checks if a property is set.
+    pub fn has_property(&self, prop: InputProp) -> bool {
+        self.properties.contain(prop)
+    }
+
+    /// Returns the supported absolute axes bitmap as bytes.
+    pub fn supported_absolute_axes_bitmap(&self) -> &[u8] {
+        self.supported_absolute_axes.as_raw_slice()
+    }
+
+    /// Returns the supported switch bitmap as bytes.
+    pub fn supported_switches_bitmap(&self) -> &[u8] {
+        self.supported_switches.as_raw_slice()
+    }
+
+    /// Returns the `INPUT_PROP_*` bitmap as bytes.
+    pub fn properties_bitmap(&self) -> &[u8] {
+        self.properties.as_raw_slice()
+    }
+
+    // K1 MUSE Book ---
+
     /// Returns the supported event types as a bitmap.
     pub fn event_types_bits(&self) -> u32 {
         self.supported_event_types.bits()
@@ -271,6 +381,16 @@ pub trait InputDevice: Send + Sync + Any + Debug {
 
     /// Device capabilities.
     fn capability(&self) -> &InputCapability;
+
+    // K1 MUSE Book --- (EVIOCGSW live state for the lid switch)
+    /// Current `EV_SW` state bits, least-significant byte first (same as `EVIOCGSW`).
+    ///
+    /// Default is all-zero. Devices that report switches override this so a
+    /// client opening the node after a lid change still sees the live state.
+    fn switch_state_bits(&self) -> [u8; 4] {
+        [0; 4]
+    }
+    // K1 MUSE Book ---
 }
 
 /// Registered input device that can submit events to handlers.
@@ -335,6 +455,15 @@ impl RegisteredInputDevice {
                 capability.support_event_type(EventTypes::REL)
                     && capability.support_relative_axis(*rel_event)
             }
+            // K1 MUSE Book --- (capability checks for EV_ABS / EV_SW)
+            InputEvent::Absolute(abs_event, _) => {
+                capability.support_event_type(EventTypes::ABS)
+                    && capability.support_absolute_axis(*abs_event)
+            }
+            InputEvent::Switch(sw_event, _) => {
+                capability.support_event_type(EventTypes::SW)
+                    && capability.support_switch(*sw_event)
+            } // K1 MUSE Book ---
         }
     }
 }

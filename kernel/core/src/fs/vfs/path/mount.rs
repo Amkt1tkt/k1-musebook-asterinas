@@ -701,6 +701,15 @@ impl Mount {
         Ok(())
     }
 
+    // K1 MUSE Book --- (reboot/poweroff path lets ext2 mark s_state VALID)
+    /// Flushes like [`Self::sync`] and lets the file system mark itself clean
+    /// on disk; only for the reboot/poweroff path.
+    pub(super) fn sync_for_shutdown(&self) -> Result<()> {
+        self.fs.sync_for_shutdown()?;
+        Ok(())
+    }
+    // K1 MUSE Book ---
+
     pub(super) fn remount(
         &self,
         mount_flags: PerMountFlags,

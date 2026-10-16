@@ -267,11 +267,19 @@ impl Inode for Ext2Inode {
     }
 
     fn sync(&self, mode: SyncMode) -> Result<()> {
+        // K1 MUSE Book --- (read-only fsync must not submit metadata writes or drive flushes)
+        let fs = self.fs()?;
+        if !fs.has_writable_mount() {
+            return Ok(());
+        }
+        // K1 MUSE Book ---
         match mode {
             SyncMode::Data => self.sync_data()?,
             SyncMode::Full => self.sync_all()?,
         }
-        let fs = self.fs()?;
+        // K1 MUSE Book --- (filesystem acquired before writeback admission)
+        // let fs = self.fs()?;
+        // K1 MUSE Book ---
         let block_group = fs.block_group(self.block_group_idx());
         block_group.sync_inode_table()?;
         if fs.block_device().sync()? != BioStatus::Complete {

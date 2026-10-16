@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: ignore local generator products and header cache.
+# Local header cache (fetched at regen time; never commit upstream .h).
+.cache/
+target/

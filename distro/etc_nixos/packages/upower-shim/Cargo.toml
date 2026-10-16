@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: UPower battery state from BAT0 sysfs.
+# A standalone userspace workspace, independent of the kernel's target/lints.
+[workspace]
+
+[package]
+name = "upower-shim"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+description = "Minimal UPower battery state from BAT0 sysfs for COSMIC"
+
+[dependencies]
+zbus = { version = "4.4.0", default-features = false, features = ["tokio"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "time"] }

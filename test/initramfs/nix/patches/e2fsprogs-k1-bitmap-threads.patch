@@ -1,0 +1,18 @@
+--- a/lib/ext2fs/rw_bitmaps.c
++++ b/lib/ext2fs/rw_bitmaps.c
+@@ -543,6 +543,15 @@
+ 				     flags & EXT2FS_BITMAPS_BLOCK);
+ 
+ #ifdef HAVE_PTHREAD
++	/* K1 MUSE Book --- (use serial bitmap reads in the stage-1 checker)
++	 * Automatic worker selection can hang while checking an unclean root
++	 * on Asterinas. Use libext2fs's existing serial fallback; it verifies
++	 * every bitmap and leaves repair decisions and write paths unchanged.
++	 * This package is private to the initramfs, not a system libext2fs.
++	 */
++	if (num_threads < 0)
++		num_threads = 1;
++	/* K1 MUSE Book --- */
+ 	if (((fs->io->flags & CHANNEL_FLAGS_THREADS) == 0) ||
+ 	    (num_threads == 1) || (fs->flags & EXT2_FLAG_IMAGE_FILE))
+ 		goto fallback;

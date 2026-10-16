@@ -25,6 +25,10 @@ macro_rules! __log_prefix {
 mod clocksource;
 mod rtc;
 mod tsc;
+// K1 MUSE Book --- (civil calendar for RTC write / clock_settime / /dev/rtc0)
+mod civil;
+pub use civil::{is_plausible, system_time_from_unix, unix_secs_from_system_time, weekday_sun0};
+// K1 MUSE Book ---
 
 pub static VDSO_DATA_HIGH_RES_UPDATE_FN: Once<fn(Instant, u64)> = Once::new();
 
@@ -83,3 +87,37 @@ pub fn read_monotonic_time() -> Duration {
 pub fn default_clocksource() -> Arc<ClockSource> {
     tsc::CLOCK.get().unwrap().clone()
 }
+
+// K1 MUSE Book --- (SPM8821 write path for the RTC device)
+/// Why a [`write_rtc`] call failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RtcWriteError {
+    /// This RTC has no write path (dummy, CMOS, Goldfish, Loongson).
+    Unsupported,
+    /// Month/day/hour out of range; the driver refused to program it.
+    InvalidTime,
+    /// MMIO / I2C failed or the value did not read back.
+    Hardware,
+}
+
+/// Programs the platform RTC, returning [`RtcWriteError::Unsupported`] on
+/// boards without a writable driver. Wall-clock setters do not call this:
+/// changing kernel time and persisting the battery-backed clock are separate
+/// operations.
+///
+/// `/dev/rtc0` `RTC_SET_TIME` also lands here. That ioctl must **not**
+/// move the wall clock — see `kernel/core/src/device/rtc/`.
+pub fn write_rtc(time: SystemTime) -> Result<(), RtcWriteError> {
+    RTC_DRIVER
+        .get()
+        .ok_or(RtcWriteError::Unsupported)?
+        .write_rtc(time)
+}
+
+/// Live calendar read from the platform RTC (not the boot sample).
+///
+/// [`None`] only if [`time_init`] has not run.
+pub fn read_rtc() -> Option<SystemTime> {
+    RTC_DRIVER.get().map(|d| d.read_rtc())
+}
+// K1 MUSE Book ---

@@ -63,6 +63,12 @@ use inherit_methods_macro::inherit_methods;
 use ostd::sync::{RwMutexReadGuard, RwMutexWriteGuard};
 use spin::Once;
 
+// K1 MUSE Book --- (notify cgroup.events after population updates)
+use super::{
+    events::{CgroupEvents, PopulatedChanges},
+    inode::CgroupInode,
+};
+// K1 MUSE Book ---
 use crate::{
     fs::cgroupfs::controller::{Controller, PidsPreCharge, SubCtrlSet, SubCtrlType},
     prelude::*,
@@ -149,6 +155,47 @@ impl CgroupMembership {
     /// A process can only belong to one cgroup at a time.
     /// When moved to a new cgroup, it's automatically removed from the
     /// previous one.
+    // K1 MUSE Book --- (publish population changes after both sides of migration are updated)
+    // pub(crate) fn move_process_to_node(
+    //     &mut self,
+    //     process: Arc<Process>,
+    //     new_cgroup: &CgroupNode,
+    // ) -> Result<()> {
+    //     let old_cgroup = if let Some(old_cgroup) = process.cgroup().get() {
+    //         // Fast path: If the process is already in this cgroup, do nothing.
+    //         if new_cgroup.id() == old_cgroup.id() {
+    //             return Ok(());
+    //         }
+    //
+    //         Some(old_cgroup.clone())
+    //     } else {
+    //         None
+    //     };
+    //
+    //     // Try to add the process to the new cgroup first.
+    //     self.add_process_to_node(&process, new_cgroup)?;
+    //     new_cgroup.controller.charge_pids();
+    //
+    //     // Remove the process from the old cgroup second.
+    //     if let Some(old_cgroup) = old_cgroup {
+    //         old_cgroup
+    //             .with_inner_mut(|old_cgroup_processes| {
+    //                 old_cgroup_processes.remove(&process.pid()).unwrap();
+    //                 if old_cgroup_processes.is_empty() {
+    //                     let old_count = old_cgroup.populated_count.fetch_sub(1, Ordering::Relaxed);
+    //                     if old_count == 1 {
+    //                         old_cgroup.propagate_sub_populated();
+    //                     }
+    //                 }
+    //             })
+    //             .unwrap();
+    //
+    //         // Uncharge the pids sub-controller for the old cgroup.
+    //         old_cgroup.controller.uncharge_pids();
+    //     }
+    //
+    //     Ok(())
+    // }
     pub(crate) fn move_process_to_node(
         &mut self,
         process: Arc<Process>,
@@ -166,7 +213,7 @@ impl CgroupMembership {
         };
 
         // Try to add the process to the new cgroup first.
-        self.add_process_to_node(&process, new_cgroup)?;
+        let mut changes = self.add_process_to_node(&process, new_cgroup)?;
         new_cgroup.controller.charge_pids();
 
         // Remove the process from the old cgroup second.
@@ -177,7 +224,7 @@ impl CgroupMembership {
                     if old_cgroup_processes.is_empty() {
                         let old_count = old_cgroup.populated_count.fetch_sub(1, Ordering::Relaxed);
                         if old_count == 1 {
-                            old_cgroup.propagate_sub_populated();
+                            old_cgroup.propagate_sub_populated(&mut changes);
                         }
                     }
                 })
@@ -187,14 +234,28 @@ impl CgroupMembership {
             old_cgroup.controller.uncharge_pids();
         }
 
+        changes.notify();
         Ok(())
     }
+    // K1 MUSE Book ---
 
     /// Moves a newly forked process into its inherited cgroup node.
     ///
     /// This is the fork-path variant of [`CgroupMembership::move_process_to_node`].
     /// It assumes the caller already holds the read side of the membership lock,
     /// and that the `CgroupNode` has already reserved a pids slot during fork.
+    // K1 MUSE Book --- (publish inherited population only after the new member is installed)
+    // pub(crate) fn move_forked_process_to_node(
+    //     &self,
+    //     process: Arc<Process>,
+    //     new_cgroup: &CgroupNode,
+    //     pids_charge: PidsPreCharge<'_>,
+    // ) {
+    //     debug_assert!(process.cgroup().get().is_none());
+    //
+    //     pids_charge.apply();
+    //     self.add_process_to_node(&process, new_cgroup).unwrap();
+    // }
     pub(crate) fn move_forked_process_to_node(
         &self,
         process: Arc<Process>,
@@ -204,10 +265,42 @@ impl CgroupMembership {
         debug_assert!(process.cgroup().get().is_none());
 
         pids_charge.apply();
-        self.add_process_to_node(&process, new_cgroup).unwrap();
+        self.add_process_to_node(&process, new_cgroup)
+            .unwrap()
+            .notify();
     }
+    // K1 MUSE Book ---
 
-    fn add_process_to_node(&self, process: &Arc<Process>, new_cgroup: &CgroupNode) -> Result<()> {
+    // K1 MUSE Book --- (retain changed nodes until membership and counters are consistent)
+    // fn add_process_to_node(&self, process: &Arc<Process>, new_cgroup: &CgroupNode) -> Result<()> {
+    //     // According to "no internal processes" rule of cgroupv2, if a non-root
+    //     // cgroup node has activated some sub-controls, it cannot bind any process.
+    //     //
+    //     // Reference: <https://man7.org/linux/man-pages/man7/cgroups.7.html>
+    //     if !new_cgroup.controller.active_set().is_empty() {
+    //         return Err(Error::ResourceUnavailable);
+    //     }
+    //     new_cgroup
+    //         .with_inner_mut(|current_processes| {
+    //             if current_processes.is_empty() {
+    //                 let old_count = new_cgroup.populated_count.fetch_add(1, Ordering::Relaxed);
+    //                 if old_count == 0 {
+    //                     new_cgroup.propagate_add_populated();
+    //                 }
+    //             }
+    //
+    //             current_processes.insert(process.pid(), Arc::downgrade(process));
+    //             process.set_cgroup(Some(new_cgroup.fields.weak_self().upgrade().unwrap()));
+    //         })
+    //         .ok_or(Error::IsDead)?;
+    //
+    //     Ok(())
+    // }
+    fn add_process_to_node(
+        &self,
+        process: &Arc<Process>,
+        new_cgroup: &CgroupNode,
+    ) -> Result<PopulatedChanges> {
         // According to "no internal processes" rule of cgroupv2, if a non-root
         // cgroup node has activated some sub-controls, it cannot bind any process.
         //
@@ -215,12 +308,13 @@ impl CgroupMembership {
         if !new_cgroup.controller.active_set().is_empty() {
             return Err(Error::ResourceUnavailable);
         }
+        let mut changes = PopulatedChanges::default();
         new_cgroup
             .with_inner_mut(|current_processes| {
                 if current_processes.is_empty() {
                     let old_count = new_cgroup.populated_count.fetch_add(1, Ordering::Relaxed);
                     if old_count == 0 {
-                        new_cgroup.propagate_add_populated();
+                        new_cgroup.propagate_add_populated(&mut changes);
                     }
                 }
 
@@ -229,10 +323,37 @@ impl CgroupMembership {
             })
             .ok_or(Error::IsDead)?;
 
-        Ok(())
+        Ok(changes)
     }
+    // K1 MUSE Book ---
 
     /// Moves a process to the root cgroup.
+    // K1 MUSE Book --- (notify empty cgroups at process exit without waiting for waitpid)
+    // pub(crate) fn move_process_to_root(&mut self, process: &Process) {
+    //     let old_cgroup = if let Some(old_cgroup) = process.cgroup().get() {
+    //         old_cgroup.clone()
+    //     } else {
+    //         // The process is already in the root cgroup. Do nothing.
+    //         return;
+    //     };
+    //
+    //     process.set_cgroup(None);
+    //
+    //     old_cgroup
+    //         .with_inner_mut(|old_cgroup_processes| {
+    //             old_cgroup_processes.remove(&process.pid()).unwrap();
+    //             if old_cgroup_processes.is_empty() {
+    //                 let old_count = old_cgroup.populated_count.fetch_sub(1, Ordering::Relaxed);
+    //                 if old_count == 1 {
+    //                     old_cgroup.propagate_sub_populated();
+    //                 }
+    //             }
+    //         })
+    //         .unwrap();
+    //
+    //     // Uncharge the pids sub-controller for the old cgroup.
+    //     old_cgroup.controller.uncharge_pids();
+    // }
     pub(crate) fn move_process_to_root(&mut self, process: &Process) {
         let old_cgroup = if let Some(old_cgroup) = process.cgroup().get() {
             old_cgroup.clone()
@@ -243,13 +364,14 @@ impl CgroupMembership {
 
         process.set_cgroup(None);
 
+        let mut changes = PopulatedChanges::default();
         old_cgroup
             .with_inner_mut(|old_cgroup_processes| {
                 old_cgroup_processes.remove(&process.pid()).unwrap();
                 if old_cgroup_processes.is_empty() {
                     let old_count = old_cgroup.populated_count.fetch_sub(1, Ordering::Relaxed);
                     if old_count == 1 {
-                        old_cgroup.propagate_sub_populated();
+                        old_cgroup.propagate_sub_populated(&mut changes);
                     }
                 }
             })
@@ -257,7 +379,9 @@ impl CgroupMembership {
 
         // Uncharge the pids sub-controller for the old cgroup.
         old_cgroup.controller.uncharge_pids();
+        changes.notify();
     }
+    // K1 MUSE Book ---
 }
 
 /// The root of a cgroup hierarchy, serving as the entry point to
@@ -304,6 +428,9 @@ pub(crate) struct CgroupNode {
     /// either on itself or in any of its descendant nodes. Consequently,
     /// a count > 0 indicates that this node is populated.
     populated_count: AtomicUsize,
+    // K1 MUSE Book --- (notify all inode views of the permanent events attribute)
+    events: CgroupEvents,
+    // K1 MUSE Book ---
 }
 
 impl Debug for CgroupNode {
@@ -432,6 +559,9 @@ impl CgroupNode {
                 inner: RwMutex::new(Some(Inner::default())),
                 depth,
                 populated_count: AtomicUsize::new(0),
+                // K1 MUSE Book --- (cgroup.events starts without watchers)
+                events: CgroupEvents::new(),
+                // K1 MUSE Book ---
             }
         })
     }
@@ -445,7 +575,44 @@ impl CgroupSysNode for CgroupNode {
 
 // For process management
 impl CgroupNode {
-    fn propagate_add_populated(&self) {
+    // K1 MUSE Book --- (connect stable attribute inodes to cgroup population updates)
+    pub(super) fn register_events_inode(&self, inode: &Arc<CgroupInode>) {
+        self.events.register(inode);
+    }
+
+    pub(super) fn notify_populated_changed(&self) {
+        self.events.notify();
+    }
+
+    pub(super) fn is_alive(&self) -> bool {
+        self.inner.read().is_some()
+    }
+    // K1 MUSE Book ---
+
+    // K1 MUSE Book --- (notify each node whose subtree becomes populated)
+    // fn propagate_add_populated(&self) {
+    //     if self.depth <= 1 {
+    //         return;
+    //     }
+    //
+    //     let mut current_parent = Arc::downcast::<CgroupNode>(self.parent().unwrap()).unwrap();
+    //     loop {
+    //         let old_count = current_parent
+    //             .populated_count
+    //             .fetch_add(1, Ordering::Relaxed);
+    //         if old_count > 0 {
+    //             break;
+    //         }
+    //
+    //         if current_parent.depth == 1 {
+    //             break;
+    //         }
+    //
+    //         current_parent = Arc::downcast::<CgroupNode>(current_parent.parent().unwrap()).unwrap();
+    //     }
+    // }
+    fn propagate_add_populated(&self, changes: &mut PopulatedChanges) {
+        changes.record(self.fields.weak_self().upgrade().unwrap());
         if self.depth <= 1 {
             return;
         }
@@ -459,6 +626,7 @@ impl CgroupNode {
                 break;
             }
 
+            changes.record(current_parent.clone());
             if current_parent.depth == 1 {
                 break;
             }
@@ -466,8 +634,32 @@ impl CgroupNode {
             current_parent = Arc::downcast::<CgroupNode>(current_parent.parent().unwrap()).unwrap();
         }
     }
+    // K1 MUSE Book ---
 
-    fn propagate_sub_populated(&self) {
+    // K1 MUSE Book --- (notify each node whose subtree becomes empty)
+    // fn propagate_sub_populated(&self) {
+    //     if self.depth <= 1 {
+    //         return;
+    //     }
+    //
+    //     let mut current_parent = Arc::downcast::<CgroupNode>(self.parent().unwrap()).unwrap();
+    //     loop {
+    //         let old_count = current_parent
+    //             .populated_count
+    //             .fetch_sub(1, Ordering::Relaxed);
+    //         if old_count != 1 {
+    //             break;
+    //         }
+    //
+    //         if current_parent.depth == 1 {
+    //             break;
+    //         }
+    //
+    //         current_parent = Arc::downcast::<CgroupNode>(current_parent.parent().unwrap()).unwrap();
+    //     }
+    // }
+    fn propagate_sub_populated(&self, changes: &mut PopulatedChanges) {
+        changes.record(self.fields.weak_self().upgrade().unwrap());
         if self.depth <= 1 {
             return;
         }
@@ -481,6 +673,7 @@ impl CgroupNode {
                 break;
             }
 
+            changes.record(current_parent.clone());
             if current_parent.depth == 1 {
                 break;
             }
@@ -488,6 +681,7 @@ impl CgroupNode {
             current_parent = Arc::downcast::<CgroupNode>(current_parent.parent().unwrap()).unwrap();
         }
     }
+    // K1 MUSE Book ---
 
     /// Performs a read-only operation on the inner data.
     ///

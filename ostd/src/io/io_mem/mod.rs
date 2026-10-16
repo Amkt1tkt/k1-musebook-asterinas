@@ -17,16 +17,29 @@ pub(crate) use self::allocator::IoMemAllocatorBuilder;
 pub(super) use self::allocator::init;
 #[cfg(all(target_arch = "x86_64", feature = "cvm_guest"))]
 use crate::arch::{if_tdx_enabled, tdx_guest::unprotect_gpa_tdvm_call};
+// K1 MUSE Book --- (retain DMA backing and enforce its cache policy through aliases)
+//         Fallible, Infallible, PAGE_SIZE, PodOnce, VmIo, VmIoFill, VmIoOnce, VmReader, VmWriter,
 use crate::{
     Error,
     arch::io::io_mem::{read_once, write_once},
     cpu::{AtomicCpuSet, CpuSet},
     mm::{
-        Fallible, Infallible, PAGE_SIZE, PodOnce, VmIo, VmIoFill, VmIoOnce, VmReader, VmWriter,
+        Fallible,
+        Infallible,
+        PAGE_SIZE,
+        PodOnce,
+        VmIo,
+        VmIoFill,
+        VmIoOnce,
+        VmReader,
+        VmWriter,
+        // K1 MUSE Book --- (owned DMA aliases retain their typed backing)
+        dma::DmaCoherent,
         io::{
             Io,
             copy::{memcpy, memset},
         },
+        // K1 MUSE Book ---
         kspace::kvirt_area::KVirtArea,
         page_prop::{CachePolicy, PageFlags, PageProperty, PrivilegedPageFlags},
         tlb::{TlbFlushOp, TlbFlusher},
@@ -34,6 +47,7 @@ use crate::{
     prelude::*,
     task::disable_preempt,
 };
+// K1 MUSE Book ---
 
 /// A marker type used for [`IoMem`],
 /// representing that the underlying MMIO is used for security-sensitive operations.
@@ -49,6 +63,9 @@ pub enum Insensitive {}
 #[derive(Clone, Debug)]
 pub struct IoMem<SecuritySensitivity = Insensitive> {
     kvirt_area: Arc<KVirtArea>,
+    // K1 MUSE Book --- (drop the alias KVA before releasing its DMA backing)
+    dma_owner: Option<Arc<DmaCoherent>>,
+    // K1 MUSE Book ---
     // The actually used range for MMIO is `kvirt_area.start + offset..kvirt_area.start + offset + limit`
     offset: usize,
     limit: usize,
@@ -57,6 +74,8 @@ pub struct IoMem<SecuritySensitivity = Insensitive> {
     phantom: PhantomData<SecuritySensitivity>,
 }
 
+// K1 MUSE Book --- (retain DMA backing and enforce its cache policy through aliases)
+//     /// 2. The given physical address range must be in the I/O memory region.
 impl<SecuritySensitivity> IoMem<SecuritySensitivity> {
     /// Slices the `IoMem`, returning another `IoMem` representing the subslice.
     ///
@@ -70,6 +89,9 @@ impl<SecuritySensitivity> IoMem<SecuritySensitivity> {
         // We've checked the range is in bounds, so we can construct the new `IoMem` safely.
         Self {
             kvirt_area: self.kvirt_area.clone(),
+            // K1 MUSE Book --- (slicing must not drop the ownership guarantee)
+            dma_owner: self.dma_owner.clone(),
+            // K1 MUSE Book ---
             offset: self.offset + range.start,
             limit: range.len(),
             pa: self.pa + range.start,
@@ -83,7 +105,8 @@ impl<SecuritySensitivity> IoMem<SecuritySensitivity> {
     /// # Safety
     ///
     /// 1. This function must be called after the kernel page table is activated.
-    /// 2. The given physical address range must be in the I/O memory region.
+    /// 2. The range must be I/O memory, or allocated DMA DRAM whose backing
+    ///    outlives this mapping and whose CPU cache policy matches cache.
     /// 3. Reading from or writing to I/O memory regions may have side effects.
     ///    If `SecuritySensitivity` is `Insensitive`, those side effects must
     ///    not cause soundness problems (e.g., they must not corrupt the kernel
@@ -142,6 +165,9 @@ impl<SecuritySensitivity> IoMem<SecuritySensitivity> {
 
         Self {
             kvirt_area: Arc::new(kva),
+            // K1 MUSE Book --- (ordinary MMIO has no DMA allocation to retain)
+            dma_owner: None,
+            // K1 MUSE Book ---
             offset: range.start - first_page_start,
             limit: range.len(),
             pa: range.start,
@@ -154,6 +180,14 @@ impl<SecuritySensitivity> IoMem<SecuritySensitivity> {
     pub fn cache_policy(&self) -> CachePolicy {
         self.cache_policy
     }
+
+    // K1 MUSE Book --- (VmSpace must preserve DMA cache attributes)
+    pub(crate) fn dma_cache_policy(&self) -> Option<CachePolicy> {
+        self.dma_owner
+            .as_ref()
+            .map(|owner| owner.cpu_cache_policy())
+    }
+    // K1 MUSE Book ---
 
     /// Returns the base virtual address of the MMIO range.
     fn base(&self) -> usize {
@@ -168,6 +202,7 @@ impl<SecuritySensitivity> IoMem<SecuritySensitivity> {
         Ok(())
     }
 }
+// K1 MUSE Book ---
 
 #[cfg_attr(target_arch = "loongarch64", expect(unused))]
 impl IoMem<Sensitive> {
@@ -211,6 +246,21 @@ impl IoMem<Sensitive> {
 }
 
 impl IoMem<Insensitive> {
+    // K1 MUSE Book --- (only an owned DMA allocation can create a DRAM alias)
+    pub(crate) fn new_dma(owner: Arc<DmaCoherent>) -> Self {
+        let range = owner.paddr()..owner.paddr() + owner.size();
+        let cache = owner.cpu_cache_policy();
+        // SAFETY: The allocation is initialized, page aligned DMA memory, with
+        // the same cache policy as its CPU backing. It remains alive in
+        // dma_owner through every clone/slice and VmSpace mapping. DmaCoherent
+        // contains only a Segment or KVirtArea, never an IoMem, so no Arc cycle
+        // can be formed. Access cannot touch unrelated or retyped RAM.
+        let mut alias = unsafe { Self::new(range, PageFlags::RW, cache) };
+        alias.dma_owner = Some(owner);
+        alias
+    }
+    // K1 MUSE Book ---
+
     /// Acquires an `IoMem` instance for the given range.
     ///
     /// The I/O memory cache policy is set to uncacheable by default.

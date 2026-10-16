@@ -157,11 +157,20 @@ impl Pollee {
     /// the same poller. Unlike [`Self::poll_with`], this method performs poller registration
     /// without checking (and perhaps caching) the current events.
     pub(crate) fn register_poller(&self, poller: &mut PollHandle, mask: IoEvents) {
-        self.inner
+        // K1 MUSE Book --- (do not grow PollHandle::pollees when the observer was already registered)
+        // self.inner
+        //     .subject
+        //     .register_observer(poller.observer.clone(), mask);
+        //
+        // poller.pollees.push(Arc::downgrade(&self.inner));
+        if self
+            .inner
             .subject
-            .register_observer(poller.observer.clone(), mask);
-
-        poller.pollees.push(Arc::downgrade(&self.inner));
+            .register_observer(poller.observer.clone(), mask)
+        {
+            poller.pollees.push(Arc::downgrade(&self.inner));
+        }
+        // K1 MUSE Book ---
     }
 
     /// Notifies pollers of some events.
@@ -228,6 +237,13 @@ impl PollHandle {
             .for_each(|pollee| {
                 pollee.subject.unregister_observer(observer);
             });
+
+        // K1 MUSE Book --- (forget the pollees once unregistered from them)
+        // The handle is now registered nowhere, so the record of where it was must go too;
+        // otherwise a handle that is reset and then polled again keeps the stale entries and
+        // grows across reuses, the same unbounded growth `register_poller` guards against.
+        self.pollees.clear();
+        // K1 MUSE Book ---
     }
 }
 

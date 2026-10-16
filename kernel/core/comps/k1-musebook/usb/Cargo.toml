@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "k1-musebook-usb"
+version = "0.1.0"
+edition.workspace = true
+
+# K1 MUSE Book: EHCI1 (USB2) always on; DWC3/xHCI (USB3) behind the `xhci`
+# cargo feature, and additionally gated at runtime by `k1.usb3=off`.
+
+[dependencies]
+aster-block.workspace = true
+aster-cmdline.workspace = true
+aster-input.workspace = true
+aster-pci.workspace = true
+aster-softirq.workspace = true
+aster-util.workspace = true
+component.workspace = true
+device-id.workspace = true
+io-util.workspace = true
+k1-musebook-gpio.workspace = true
+log.workspace = true
+ostd.workspace = true
+spin.workspace = true
+
+[features]
+# DWC3 / xHCI / MSC / USB3 HID. Off unless the kernel `usb` feature is set.
+# EHCI1 (USB2 HID) is always compiled. Runtime `k1.usb3=off` skips the
+# DWC3/xHCI bring-up without a rebuild; EHCI is unaffected.
+xhci = []
+
+[lints]
+workspace = true

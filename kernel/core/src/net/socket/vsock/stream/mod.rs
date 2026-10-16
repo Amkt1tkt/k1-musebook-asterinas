@@ -390,7 +390,12 @@ impl Socket for VsockStreamSocket {
             warn!("sending control message is not supported");
         }
 
-        self.block_on(IoEvents::OUT, None, || self.try_send(reader, flags))
+        // K1 MUSE Book --- (MSG_DONTWAIT; see `SocketPrivate::block_on_unless`)
+        //         self.block_on(IoEvents::OUT, None, || self.try_send(reader, flags))
+        self.block_on_unless(flags.dont_wait(), IoEvents::OUT, None, || {
+            self.try_send(reader, flags)
+        })
+        // K1 MUSE Book ---
 
         // TODO: Trigger `SIGPIPE` if the error code is `EPIPE` and `MSG_NOSIGNAL` is not specified
     }
@@ -405,7 +410,12 @@ impl Socket for VsockStreamSocket {
             warn!("unsupported flags: {:?}", flags);
         }
 
-        let received_bytes = self.block_on(IoEvents::IN, None, || self.try_recv(writer, flags))?;
+        // K1 MUSE Book --- (MSG_DONTWAIT; see `SocketPrivate::block_on_unless`)
+        //         let received_bytes = self.block_on(IoEvents::IN, None, || self.try_recv(writer, flags))?;
+        let received_bytes = self.block_on_unless(flags.dont_wait(), IoEvents::IN, None, || {
+            self.try_recv(writer, flags)
+        })?;
+        // K1 MUSE Book ---
 
         // TODO: Receive control message
         let message_header = MessageHeader::new(None, Vec::new());

@@ -193,6 +193,28 @@ pub(super) fn process(trap_frame: &TrapFrame, hw_irq_line: &HwIrqLine) {
     hw_irq_line.ack();
 }
 
+// K1 MUSE Book --- (software MSI demux: one PLIC wire, many vectors)
+/// Runs the callbacks registered on the software IRQ line numbered `irq_num`.
+///
+/// For message-signaled interrupts on platforms where all MSIs are funneled
+/// through a single wire interrupt and demultiplexed in software (e.g. a
+/// PCIe Root Complex that reports the MSI vector via a FIFO). There is no
+/// per-vector hardware line to claim; the caller acknowledges the wire.
+pub fn process_msi(irq_num: u8, trap_frame: &TrapFrame) {
+    let Some(index) = irq_num.checked_sub(IRQ_NUM_MIN) else {
+        return;
+    };
+    let index = index as usize;
+    if index >= NUMBER_OF_IRQS {
+        return;
+    }
+    let inner = &INNERS[index];
+    for callback in &*inner.callbacks.read() {
+        callback(trap_frame);
+    }
+}
+// K1 MUSE Book ---
+
 #[cfg(ktest)]
 mod test {
     use super::*;

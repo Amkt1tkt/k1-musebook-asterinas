@@ -5,7 +5,10 @@ use ostd::mm::VmIo;
 use super::SyscallReturn;
 use crate::{
     prelude::*,
-    time::{SystemTime, timeval_t, timezone_t},
+    // K1 MUSE Book --- (timezone_t is now returned by the shared state accessor)
+    // time::{SystemTime, timeval_t, timezone_t},
+    time::{SystemTime, timeval_t},
+    // K1 MUSE Book ---
 };
 
 pub(super) fn sys_gettimeofday(
@@ -23,8 +26,11 @@ pub(super) fn sys_gettimeofday(
     }
 
     if timezone_addr != 0 {
-        // TODO: Return the actual system timezone when available.
-        let tz = timezone_t::default();
+        // K1 MUSE Book --- (read the metadata installed by settimeofday)
+        // // TODO: Return the actual system timezone when available.
+        // let tz = timezone_t::default();
+        let tz = crate::time::timezone();
+        // K1 MUSE Book ---
         ctx.user_space().write_val(timezone_addr, &tz)?;
     }
 

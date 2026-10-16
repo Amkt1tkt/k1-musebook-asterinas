@@ -10,9 +10,15 @@ ostd.workspace = true
 # High-level component crates.
 #
 # Keep this list in sync with the `extern crate` declarations in `src/lib.rs`.
+aster-uart.workspace = true
+
+# K1 MUSE Book --- (RISC-V uses the K1 DRM registry and its software fallback)
+# aster-drm.workspace = true
+# aster-simpledrm.workspace = true
+[target.'cfg(not(target_arch = "riscv64"))'.dependencies]
 aster-drm.workspace = true
 aster-simpledrm.workspace = true
-aster-uart.workspace = true
+# K1 MUSE Book ---
 
 [target.x86_64-unknown-none.dependencies]
 aster-i8042.workspace = true
@@ -23,6 +29,11 @@ coverage = ["aster-core/coverage"]
 cvm_guest = ["aster-core/cvm_guest"]
 pvh_boot = ["aster-core/pvh_boot"]
 riscv_sv39_mode = ["aster-core/riscv_sv39_mode"]
+# K1 MUSE Book --- (forward the board features to aster-core)
+pvr = ["aster-core/pvr"]
+cpufreq = ["aster-core/cpufreq"]
+usb = ["aster-core/usb"]
+# K1 MUSE Book ---
 
 [lints]
 workspace = true

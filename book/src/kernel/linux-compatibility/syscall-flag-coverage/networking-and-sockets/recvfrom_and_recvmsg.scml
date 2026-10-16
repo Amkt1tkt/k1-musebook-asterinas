@@ -1,5 +1,8 @@
 // Supported message receive flags
-recv_flags = MSG_PEEK | MSG_TRUNC;
+// K1 MUSE Book --- (nonblocking receives and close-on-exec rights installation)
+// recv_flags = MSG_PEEK | MSG_TRUNC;
+recv_flags = MSG_PEEK | MSG_TRUNC | MSG_DONTWAIT | MSG_CMSG_CLOEXEC;
+// K1 MUSE Book ---
 
 // Receive message from a socket
 recvfrom(
@@ -8,9 +11,34 @@ recvfrom(
     src_addr, addrlen
 );
 
+// K1 MUSE Book --- (only UNIX rights/credentials ancillary types are delivered)
+struct unix_control = {
+    cmsg_level = SOL_SOCKET,
+    cmsg_type = SCM_RIGHTS,
+    ..
+};
+struct unix_control = {
+    cmsg_level = SOL_SOCKET,
+    cmsg_type = SCM_CREDENTIALS,
+    ..
+};
+
+struct recv_msg_hdr = {
+    msg_control = NULL,
+    ..
+};
+struct recv_msg_hdr = {
+    msg_control = [ <unix_control> ],
+    ..
+};
+// K1 MUSE Book ---
+
 // Receive message using scatter-gather buffers and ancillary data
 recvmsg(
     sockfd,
-    msg,
+    // K1 MUSE Book --- (describe the supported ancillary header output)
+    // msg,
+    msg = <recv_msg_hdr>,
+    // K1 MUSE Book ---
     flags = <recv_flags>
 );

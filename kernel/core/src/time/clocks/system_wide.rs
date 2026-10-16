@@ -8,9 +8,12 @@ use ostd::{cpu::PinCurrentCpu, cpu_local, sync::SpinLock, task::disable_preempt,
 use paste::paste;
 use spin::Once;
 
-use crate::time::{
-    self, Clock, SystemTime, system_time::START_TIME_AS_DURATION, timer::TimerManager,
-};
+// K1 MUSE Book --- (MONOTONIC_COARSE no longer subtracts START_TIME_AS_DURATION)
+// use crate::time::{
+//     self, Clock, SystemTime, system_time::START_TIME_AS_DURATION, timer::TimerManager,
+// };
+use crate::time::{self, Clock, SystemTime, timer::TimerManager};
+// K1 MUSE Book ---
 
 /// The Clock that reads the jiffies, and turn the counter into `Duration`.
 pub(crate) struct JiffiesClock {
@@ -170,9 +173,14 @@ impl Clock for RealTimeCoarseClock {
 }
 
 impl Clock for MonotonicCoarseClock {
+    // K1 MUSE Book --- (do not derive from realtime - START_TIME: clock_settime would jump MONOTONIC_COARSE)
+    // fn read_time(&self) -> Duration {
+    //     RealTimeCoarseClock::get().read_time() - *START_TIME_AS_DURATION.get().unwrap()
+    // }
     fn read_time(&self) -> Duration {
-        RealTimeCoarseClock::get().read_time() - *START_TIME_AS_DURATION.get().unwrap()
+        read_monotonic_time()
     }
+    // K1 MUSE Book ---
 }
 
 impl Clock for MonotonicRawClock {
@@ -287,6 +295,15 @@ fn update_coarse_clock() {
     let current = RealTimeCoarseClock::current_ref().get().unwrap();
     *current.disable_irq().lock() = real_time;
 }
+
+// K1 MUSE Book --- (re-sample the coarse realtime cache after clock_settime)
+pub(in crate::time) fn refresh_coarse_realtime() {
+    if RealTimeCoarseClock::current_ref().get().is_some() && CLOCK_REALTIME_INSTANCE.get().is_some()
+    {
+        update_coarse_clock();
+    }
+}
+// K1 MUSE Book ---
 
 fn init_coarse_clock() {
     let real_time = RealTimeClock::get().read_time();

@@ -58,7 +58,10 @@ impl Inode {
             let inner = self.inner.read();
             inner.readdir_at(offset, visitor)
         };
-        self.inner.write().set_atime(utils::now());
+        // K1 MUSE Book --- (do not stage atime on a read-only filesystem)
+        // self.inner.write().set_atime(utils::now());
+        self.record_access()?;
+        // K1 MUSE Book ---
         result
     }
 

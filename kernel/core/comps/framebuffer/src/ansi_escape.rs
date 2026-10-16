@@ -20,6 +20,16 @@ pub(super) enum EraseInDisplay {
     EntireScreenAndScrollback,
 }
 
+// K1 MUSE Book --- (EL / CSI n K; readline and bash)
+/// The mode for "Erase in Line" (EL) commands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EraseInLine {
+    CursorToEnd,
+    CursorToBeginning,
+    EntireLine,
+}
+// K1 MUSE Book ---
+
 /// A trait to execute operations from ANSI escape sequences.
 pub(super) trait EscapeOp {
     /// Sets the cursor position.
@@ -32,6 +42,11 @@ pub(super) trait EscapeOp {
 
     /// Erases part or all of the display.
     fn erase_in_display(&mut self, mode: EraseInDisplay);
+
+    // K1 MUSE Book --- (EL / CSI n K)
+    /// Erases part or all of the current line.
+    fn erase_in_line(&mut self, mode: EraseInLine);
+    // K1 MUSE Book ---
 }
 
 const MAX_PARAMS: usize = 8;
@@ -333,6 +348,19 @@ impl EscapeFsm {
                 op.erase_in_display(mode);
             }
 
+            // K1 MUSE Book --- (EL - Erase in Line: CSI n K; readline/bash)
+            b'K' => {
+                let n = self.param_or(0, 0);
+                let mode = match n {
+                    0 => EraseInLine::CursorToEnd,
+                    1 => EraseInLine::CursorToBeginning,
+                    2 => EraseInLine::EntireLine,
+                    _ => return,
+                };
+                op.erase_in_line(mode);
+            }
+            // K1 MUSE Book ---
+
             // SGR - Select Graphic Rendition
             b'm' => self.handle_sgr(num_params, op),
 
@@ -488,6 +516,10 @@ mod test {
         fn erase_in_display(&mut self, mode: EraseInDisplay) {
             self.last_ed = Some(mode);
         }
+
+        // K1 MUSE Book --- (EL trait method for the test EscapeOp stub)
+        fn erase_in_line(&mut self, _mode: EraseInLine) {}
+        // K1 MUSE Book ---
     }
 
     fn eat_escape_sequence(esc_fsm: &mut EscapeFsm, state: &mut State, bytes: &[u8]) {

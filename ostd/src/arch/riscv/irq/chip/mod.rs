@@ -138,6 +138,20 @@ impl IrqChip {
             .complete_interrupt(hart, interrupt_source_on_chip.interrupt);
     }
 
+    // K1 MUSE Book --- (oneshot mask for level sources the handler cannot deassert, e.g. PMIC key)
+    /// Enables or disables delivery of a mapped interrupt source on every
+    /// hart the chip manages, leaving the mapping and priority in place.
+    fn set_irq_line_enabled(&self, mapped_irq_line: &MappedIrqLine, enabled: bool) {
+        let plics = self.plics.lock();
+
+        let InterruptSourceOnChip { index, interrupt } = &mapped_irq_line.interrupt_source_on_chip;
+        let plic = &plics[*index];
+
+        plic.managed_harts()
+            .for_each(|hart| plic.set_interrupt_enabled(hart, *interrupt, enabled));
+    }
+    // K1 MUSE Book ---
+
     /// Unmaps an IRQ line from the IRQ chip.
     fn unmap_irq_line(&self, mapped_irq_line: &MappedIrqLine) {
         let mut plics = self.plics.lock();
@@ -159,6 +173,27 @@ pub struct MappedIrqLine {
     irq_line: IrqLine,
     interrupt_source_on_chip: InterruptSourceOnChip,
 }
+
+// K1 MUSE Book --- (IRQF_ONESHOT-style mask; required by the PMIC power-key driver)
+impl MappedIrqLine {
+    /// Masks (`false`) or unmasks (`true`) the interrupt source at the chip.
+    ///
+    /// A level-triggered source that the handler cannot deassert on the spot
+    /// (an I2C device's INT pin, for example) would otherwise re-enter the
+    /// handler as soon as it completes. Mask it, deassert the source from a
+    /// bottom half, then unmask.
+    ///
+    /// **Do not mask from inside the `on_active` callback.** The PLIC only
+    /// accepts a completion for a source that is enabled for the target
+    /// (otherwise the completion is silently ignored). The completion is
+    /// written right after the callbacks return, so a source disabled in the
+    /// callback is never completed and its gateway never forwards another
+    /// interrupt. Mask from the bottom half instead.
+    pub fn set_enabled(&self, enabled: bool) {
+        IRQ_CHIP.get().unwrap().set_irq_line_enabled(self, enabled)
+    }
+}
+// K1 MUSE Book ---
 
 impl fmt::Debug for MappedIrqLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

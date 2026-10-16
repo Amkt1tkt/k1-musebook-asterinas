@@ -510,9 +510,16 @@ impl Socket for UnixStreamSocket {
         }
         let mut auxiliary_data = AuxiliaryData::from_control(control_messages)?;
 
-        self.block_on(IoEvents::OUT, self.timeouts.send_timeout(), || {
-            self.try_send(reader, &mut auxiliary_data, flags)
-        })
+        // K1 MUSE Book --- (MSG_DONTWAIT; see `SocketPrivate::block_on_unless`)
+        //         self.block_on(IoEvents::OUT, self.timeouts.send_timeout(), || {
+        //             self.try_send(reader, &mut auxiliary_data, flags)
+        self.block_on_unless(
+            flags.dont_wait(),
+            IoEvents::OUT,
+            self.timeouts.send_timeout(),
+            || self.try_send(reader, &mut auxiliary_data, flags),
+        )
+        // K1 MUSE Book ---
     }
 
     fn recvmsg(
@@ -525,10 +532,17 @@ impl Socket for UnixStreamSocket {
             warn!("unsupported flags: {:?}", flags);
         }
 
-        let (output, control_messages) =
-            self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
-                self.try_recv(writer, flags)
-            })?;
+        // K1 MUSE Book --- (MSG_DONTWAIT; see `SocketPrivate::block_on_unless`)
+        //         let (output, control_messages) =
+        //                 self.try_recv(writer, flags)
+        //             })?;
+        let (output, control_messages) = self.block_on_unless(
+            flags.dont_wait(),
+            IoEvents::IN,
+            self.timeouts.recv_timeout(),
+            || self.try_recv(writer, flags),
+        )?;
+        // K1 MUSE Book ---
 
         let message_header = MessageHeader::new(None, control_messages);
 

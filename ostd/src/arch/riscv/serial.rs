@@ -2,8 +2,11 @@
 
 //! The console I/O.
 
-use core::fmt;
+// K1 MUSE Book --- (write CRLF without recursively taking the serial lock)
+// use core::fmt;
+use core::fmt::{self, Write};
 
+// K1 MUSE Book ---
 use spin::Once;
 
 use crate::{
@@ -26,14 +29,42 @@ impl SbiSerial {
     }
 }
 
-impl fmt::Write for SbiSerial {
+// K1 MUSE Book --- (write CRLF without recursively taking the serial lock)
+// impl fmt::Write for SbiSerial {
+//     fn write_str(&mut self, s: &str) -> fmt::Result {
+//         for c in s.as_bytes() {
+//             sbi_rt::console_write_byte(*c);
+//         }
+//         Ok(())
+//     }
+// }
+impl Write for SbiSerial {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.as_bytes() {
-            sbi_rt::console_write_byte(*c);
-        }
+        write_str_raw(s);
         Ok(())
     }
 }
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (re-entrant raw write for nested early_print / panic during write_fmt)
+/// Writes without taking [`SERIAL_PORT`].
+///
+/// Only used when this CPU already holds that lock — a nested `early_print`
+/// or a panic during `write_fmt`. `SbiSerial` has no state, so the bytes
+/// are the same either way.
+pub(crate) fn write_fmt_raw(args: fmt::Arguments) {
+    let _ = SbiSerial::new().write_fmt(args);
+}
+
+fn write_str_raw(s: &str) {
+    for c in s.as_bytes() {
+        if *c == b'\n' {
+            sbi_rt::console_write_byte(b'\r');
+        }
+        sbi_rt::console_write_byte(*c);
+    }
+}
+// K1 MUSE Book ---
 
 /// Initializes the serial port.
 pub(crate) fn init(_early_cmdline: &EarlyCmdline) {}

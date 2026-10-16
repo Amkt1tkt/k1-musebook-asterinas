@@ -122,8 +122,11 @@ impl KernelEventFile {
     /// Unlike userspace writes, this operation may bring the counter to
     /// `u64::MAX`, which is reported through `POLLERR`.
     /// Reference: <https://elixir.bootlin.com/linux/v7.0/source/fs/eventfd.c#L46>.
-    #[cfg_attr(not(ktest), expect(dead_code))]
+    // K1 MUSE Book --- (used by EventFile::signal for DRM SYNCOBJ_EVENTFD on riscv64)
+    // #[cfg_attr(not(ktest), expect(dead_code))]
+    #[cfg_attr(not(any(target_arch = "riscv64", ktest)), expect(dead_code))]
     pub(crate) fn signal(&self) {
+        // K1 MUSE Book ---
         let mut counter = self.counter.lock();
         *counter = counter.saturating_add(1);
 
@@ -170,6 +173,13 @@ impl EventFile {
             common: FileCommon::new(pseudo_path, AccessMode::O_RDWR, status_flags),
         }
     }
+
+    // K1 MUSE Book --- (DRM SYNCOBJ_EVENTFD increments the eventfd from the kernel)
+    #[cfg_attr(not(target_arch = "riscv64"), expect(dead_code))]
+    pub(crate) fn signal(&self) {
+        self.kernel_event_file.signal();
+    }
+    // K1 MUSE Book ---
 
     fn is_nonblocking(&self) -> bool {
         self.common.is_nonblocking()

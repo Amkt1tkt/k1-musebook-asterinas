@@ -137,7 +137,18 @@ pub(crate) struct NvmePciTransportLock {
 
 pub(crate) struct NvmePciTransportGuard<'a> {
     inner: SpinLockGuard<'a, NvmePciTransportInner, LocalIrqDisabled>,
+    // K1 MUSE Book --- (short locked register access during failed-controller disable)
+    config_bar: &'a BarAccess,
+    // K1 MUSE Book ---
 }
+
+// K1 MUSE Book --- (the guard covers one read or RMW, never the polling loop)
+impl NvmePciTransportGuard<'_> {
+    pub(crate) fn regs(&mut self) -> RegAccess<'_> {
+        RegAccess(self.config_bar)
+    }
+}
+// K1 MUSE Book ---
 
 impl Deref for NvmePciTransportGuard<'_> {
     type Target = NvmePciTransportInner;
@@ -163,11 +174,14 @@ impl NvmePciTransportLock {
     }
 
     /// Locks the inner transport and returns a guard for register and MSI-X access.
+    // K1 MUSE Book --- (borrow controller registers under the same transport guard)
     pub(crate) fn lock(&self) -> NvmePciTransportGuard<'_> {
         NvmePciTransportGuard {
             inner: self.inner.lock(),
+            config_bar: &self.config_bar,
         }
     }
+    // K1 MUSE Book ---
 
     /// Returns doorbell access without taking the transport lock.
     pub(crate) fn dbregs(&self) -> DbregAccess<'_> {

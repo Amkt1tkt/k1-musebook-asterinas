@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT OR GPL-2.0-only
+[package]
+name = "k1-musebook-pvr"
+version = "0.1.0"
+edition.workspace = true
+# Dual-licensed to match the upstream driver this is a port of, so that the
+# port can be redistributed under either license.
+license = "MIT OR GPL-2.0-only"
+
+# K1 MUSE Book: safe-Rust port of Linux `drivers/gpu/drm/imagination`
+# (powervr) for the SpacemiT K1 IMG BXE-2-32 (BVNC 36.29.52.182).
+
+[dependencies]
+aster-cmdline.workspace = true
+k1-musebook-drm.workspace = true
+# The GPU interrupt's deferred half. The top half may only read, acknowledge and
+# hand off; everything that can block on the firmware runs from a `Taskless`.
+aster-softirq.workspace = true
+bitflags.workspace = true
+component.workspace = true
+id-alloc.workspace = true
+ostd.workspace = true
+ostd-pod.workspace = true
+spin.workspace = true
+# Required explicitly by `ostd-pod`'s derive macros, which expand to
+# compile-time checks that reference `zerocopy` by crate name.
+zerocopy.workspace = true
+
+[lints]
+workspace = true

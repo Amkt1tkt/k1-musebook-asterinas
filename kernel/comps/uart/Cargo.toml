@@ -16,6 +16,9 @@ spin.workspace = true
 aster-util.workspace = true
 fdt.workspace = true
 fdt-util.workspace = true
+# K1 MUSE Book --- (SBI DBCN output and timer-polled legacy input)
+sbi-rt = { workspace = true, features = ["legacy"] }
+# K1 MUSE Book ---
 
 [target.aarch64-unknown-none-softfloat.dependencies]
 fdt-util.workspace = true

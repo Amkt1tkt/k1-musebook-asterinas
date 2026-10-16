@@ -5,7 +5,12 @@
 pub(crate) use core::{Clock, timer};
 
 use ::core::time::Duration;
-pub(crate) use system_time::{START_TIME, SystemTime};
+// K1 MUSE Book --- (share the precise wall origin with the vDSO)
+// pub(crate) use system_time::{START_TIME, SystemTime};
+#[cfg(not(target_arch = "loongarch64"))]
+pub(crate) use system_time::wall_origin;
+pub(crate) use system_time::{START_TIME, SystemTime, validate_realtime_input};
+// K1 MUSE Book ---
 pub(crate) use timer::{Timer, TimerManager};
 
 use crate::prelude::*;
@@ -33,6 +38,90 @@ pub(super) fn init() {
     softirq::init();
     cpu_time_stats::init();
 }
+
+// K1 MUSE Book --- (system time is global, not private to a user namespace)
+pub(crate) fn require_sys_time() -> Result<()> {
+    use crate::{
+        process::{UserNamespace, credentials::capabilities::CapSet, posix_thread::AsPosixThread},
+        security::lsm::hooks,
+    };
+    let thread = current_thread!();
+    hooks::on_capable(hooks::CapableContext::new(
+        UserNamespace::get_init_singleton().as_ref(),
+        thread.as_posix_thread().unwrap(),
+        CapSet::SYS_TIME,
+    ))
+}
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (legacy timezone metadata used by UTC hwclock initialization)
+struct TimezoneState {
+    value: timezone_t,
+    first: bool,
+}
+
+impl TimezoneState {
+    const fn new() -> Self {
+        Self {
+            value: timezone_t {
+                tz_minuteswest: 0,
+                tz_dsttime: 0,
+            },
+            first: true,
+        }
+    }
+
+    fn set(&mut self, value: timezone_t, has_time: bool) -> Result<()> {
+        if !(-900..=900).contains(&value.tz_minuteswest) {
+            return_errno_with_message!(
+                Errno::EINVAL,
+                "timezone is outside the Linux fifteen-hour range"
+            );
+        }
+        // This kernel samples the RTC as UTC. Do not pretend to implement
+        // Linux's first-call local-RTC warp or persistent_clock_is_local.
+        // hwclock --hctosys --utc first supplies zero to disable that warp.
+        if self.first && !has_time && value.tz_minuteswest != 0 {
+            return_errno_with_message!(
+                Errno::EOPNOTSUPP,
+                "first-call local RTC clock warp is unsupported"
+            );
+        }
+        self.value = value;
+        self.first = false;
+        Ok(())
+    }
+}
+
+static TIMEZONE: SpinLock<TimezoneState> = SpinLock::new(TimezoneState::new());
+
+/// Reads the timezone metadata shared by gettimeofday and the vDSO.
+pub(crate) fn timezone() -> timezone_t {
+    TIMEZONE.disable_irq().lock().value
+}
+
+pub(crate) fn set_timezone(value: timezone_t, has_time: bool) -> Result<()> {
+    TIMEZONE.disable_irq().lock().set(value, has_time)?;
+    // No timezone lock is held while entering the vDSO lock. The vDSO reads
+    // current metadata under its own lock, so delayed setters cannot publish
+    // an older timezone after a newer setter's refresh.
+    #[cfg(not(target_arch = "loongarch64"))]
+    crate::vdso::refresh_timezone();
+    Ok(())
+}
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (settable realtime without implicit RTC I/O)
+/// Sets CLOCK_REALTIME and refreshes its cached representations.
+/// RTC persistence is handled by RTC_SET_TIME and the distro's hwclock service.
+pub(crate) fn set_realtime(new_unix: Duration) -> Result<()> {
+    system_time::set_wall_base_from_unix(new_unix)?;
+    clocks::refresh_coarse_realtime();
+    #[cfg(not(target_arch = "loongarch64"))]
+    crate::vdso::refresh_realtime();
+    Ok(())
+}
+// K1 MUSE Book ---
 
 pub(super) fn init_on_each_cpu() {
     cpu_time_stats::init_on_each_cpu();
@@ -170,3 +259,70 @@ pub(crate) struct timezone_t {
     pub tz_minuteswest: i32,
     pub tz_dsttime: i32,
 }
+
+// K1 MUSE Book --- (UTC hwclock timezone sequence and unsupported local-RTC warp)
+#[cfg(ktest)]
+mod timezone_tests {
+    use ostd::prelude::ktest;
+
+    use super::*;
+
+    #[ktest]
+    fn utc_initialization_accepts_later_timezone_metadata_without_warping() {
+        let mut state = TimezoneState::new();
+        let local = timezone_t {
+            tz_minuteswest: -480,
+            tz_dsttime: 0,
+        };
+        assert_eq!(
+            state.set(local, false).unwrap_err().error(),
+            Errno::EOPNOTSUPP
+        );
+        assert!(state.first);
+        assert_eq!(state.value.tz_minuteswest, 0);
+        state.set(timezone_t::default(), false).unwrap();
+        state.set(local, false).unwrap();
+        assert!(!state.first);
+        assert_eq!(state.value.tz_minuteswest, -480);
+        let mut simultaneous = TimezoneState::new();
+        simultaneous.set(local, true).unwrap();
+        assert_eq!(simultaneous.value.tz_minuteswest, -480);
+    }
+
+    #[ktest]
+    fn timezone_range_errors_preserve_prior_metadata_and_first_call_state() {
+        let mut state = TimezoneState::new();
+        for minutes in [-901, 901, i32::MIN, i32::MAX] {
+            assert_eq!(
+                state
+                    .set(
+                        timezone_t {
+                            tz_minuteswest: minutes,
+                            tz_dsttime: 1
+                        },
+                        true
+                    )
+                    .unwrap_err()
+                    .error(),
+                Errno::EINVAL
+            );
+            assert!(state.first);
+            assert_eq!(state.value.tz_minuteswest, 0);
+        }
+        state.set(timezone_t::default(), false).unwrap();
+        for minutes in [-900, 900] {
+            state
+                .set(
+                    timezone_t {
+                        tz_minuteswest: minutes,
+                        tz_dsttime: 42,
+                    },
+                    false,
+                )
+                .unwrap();
+            assert_eq!(state.value.tz_minuteswest, minutes);
+            assert_eq!(state.value.tz_dsttime, 42);
+        }
+    }
+}
+// K1 MUSE Book ---

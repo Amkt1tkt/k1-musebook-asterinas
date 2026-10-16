@@ -10,8 +10,10 @@ use crate::{
     mm::{Paddr, Vaddr},
 };
 
-// Include the AP boot assembly code
-global_asm!(include_str!("ap_boot.S"));
+// K1 MUSE Book --- (inject USE_SV48 so AP boot skips Sv48 on Sv39-only silicon)
+// global_asm!(include_str!("ap_boot.S"));
+global_asm!(include_str!("ap_boot.S"), USE_SV48 = const super::BOOT_USE_SV48);
+// K1 MUSE Book ---
 
 pub(crate) fn count_processors() -> Option<u32> {
     let mut hart_count = 0;

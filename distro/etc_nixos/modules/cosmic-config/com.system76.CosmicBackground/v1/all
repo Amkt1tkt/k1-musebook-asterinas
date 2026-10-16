@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: MPL-2.0
+// K1 MUSE Book: complete solid-background default schema.
+(
+    output: "all",
+    source: Color(Single([0.161, 0.161, 0.161])),
+    filter_by_theme: false,
+    rotation_frequency: 0,
+    filter_method: Nearest,
+    scaling_mode: Zoom,
+    sampling_method: Alphanumeric,
+)

@@ -21,6 +21,19 @@ pub(crate) trait FileSystem: Any + Sync + Send {
     /// Syncs the file system.
     fn sync(&self) -> Result<()>;
 
+    // K1 MUSE Book --- (ext2 sets s_state VALID so the next boot's e2fsck -p can skip)
+    /// Syncs the file system right before the machine reboots or powers off.
+    ///
+    /// Like [`Self::sync`], but the file system may additionally record on
+    /// disk that it was left in a consistent state (ext2 sets `s_state`
+    /// `VALID`), so that the next boot's `fsck -p` can skip the full check.
+    /// Nothing may write to the file system after this returns. The default
+    /// is a plain `sync()`.
+    fn sync_for_shutdown(&self) -> Result<()> {
+        self.sync()
+    }
+    // K1 MUSE Book ---
+
     /// Returns the root inode of this file system.
     ///
     /// For each mount, the VFS invokes this method only once and eagerly when

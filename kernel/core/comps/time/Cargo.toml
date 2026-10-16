@@ -11,10 +11,16 @@ bitflags.workspace = true
 component.workspace = true
 ostd.workspace = true
 spin.workspace = true
+# K1 MUSE Book --- (`k1.diag=rtc` in the SPM8821 driver)
+aster-cmdline.workspace = true
+# K1 MUSE Book ---
 
 [target.riscv64imac-unknown-none-elf.dependencies]
 chrono.workspace = true
 fdt-util.workspace = true
+# K1 MUSE Book --- (PMIC RTC on TWSI8)
+k1-musebook-i2c.workspace = true
+# K1 MUSE Book ---
 
 [target.loongarch64-unknown-none-softfloat.dependencies]
 fdt-util.workspace = true

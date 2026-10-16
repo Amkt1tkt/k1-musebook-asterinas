@@ -18,6 +18,11 @@ At the time of writing,
 Asterinas supports over 240 Linux system calls for the x86-64 architecture,
 which are summarized in the table below.
 
+<!-- K1 MUSE Book --- (the realtime setters are implemented with bounded coverage) -->
+<!-- Original upstream rows:
+| 164     | settimeofday           | ❌             | N/A |
+| 227     | clock_settime          | ❌             | N/A |
+-->
 | Numbers | Names                  | Supported      | Flag Coverage |
 | ------- | ---------------------- | -------------- | --- |
 | 0       | read                   | ✅             | 💯 |
@@ -184,7 +189,7 @@ which are summarized in the table below.
 | 161     | chroot                 | ✅             | 💯 |
 | 162     | sync                   | ✅             | 💯 |
 | 163     | acct                   | ❌             | N/A |
-| 164     | settimeofday           | ❌             | N/A |
+| 164     | settimeofday           | ✅             | [⚠️](syscall-flag-coverage/system-information-and-misc/#settimeofday) |
 | 165     | mount                  | ✅             | [⚠️](syscall-flag-coverage/file-systems-and-mount-control/#mount) |
 | 166     | umount2                | ✅             | [⚠️](syscall-flag-coverage/file-systems-and-mount-control/#umount-and-umount2) |
 | 167     | swapon                 | ❌             | N/A |
@@ -247,7 +252,7 @@ which are summarized in the table below.
 | 224     | timer_gettime          | ✅             | 💯 |
 | 225     | timer_getoverrun       | ❌             | N/A |
 | 226     | timer_delete           | ✅             | 💯 |
-| 227     | clock_settime          | ❌             | N/A |
+| 227     | clock_settime          | ✅             | [⚠️](syscall-flag-coverage/system-information-and-misc/#clock_settime) |
 | 228     | clock_gettime          | ✅             | [⚠️](syscall-flag-coverage/system-information-and-misc/#clock_gettime) |
 | 229     | clock_getres           | ❌             | N/A |
 | 230     | clock_nanosleep        | ✅             | [⚠️](syscall-flag-coverage/system-information-and-misc/#clock_nanosleep) |
@@ -355,6 +360,7 @@ which are summarized in the table below.
 | 439     | faccessat2             | ✅             | [⚠️](syscall-flag-coverage/file-and-directory-operations/#faccessat2) |
 | 441     | epoll_pwait2           | ✅             | 💯 |
 | 452     | fchmodat2              | ✅             | 💯 |
+<!-- K1 MUSE Book --- -->
 
 - Supported:
     - ✅ = syscall supported

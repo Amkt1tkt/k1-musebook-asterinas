@@ -10,6 +10,9 @@ use crate::{
             sys::kernel::{
                 cap_last_cap::CapLastCapFileOps,
                 pid_max::PidMaxFileOps,
+                // K1 MUSE Book --- (journald reads /proc/sys/kernel/random/{boot_id,uuid})
+                random::RandomDirOps,
+                // K1 MUSE Book ---
                 tainted::TaintedFileOps,
                 uts::{DomainnameFileOps, HostnameFileOps, OsReleaseFileOps, VersionFileOps},
                 yama::YamaDirOps,
@@ -27,6 +30,9 @@ use crate::{
 
 mod cap_last_cap;
 mod pid_max;
+// K1 MUSE Book --- (systemd sd_id128_get_boot / %b)
+mod random;
+// K1 MUSE Book ---
 mod tainted;
 mod uts;
 mod yama;
@@ -52,6 +58,9 @@ impl KernelDirOps {
         ("hostname", InodeType::File, HostnameFileOps::new_inode),
         ("osrelease", InodeType::File, OsReleaseFileOps::new_inode),
         ("pid_max", InodeType::File, PidMaxFileOps::new_inode),
+        // K1 MUSE Book --- (journald open("/proc/sys/kernel/random/boot_id"))
+        ("random", InodeType::Dir, RandomDirOps::new_inode),
+        // K1 MUSE Book ---
         ("tainted", InodeType::File, TaintedFileOps::new_inode),
         ("version", InodeType::File, VersionFileOps::new_inode),
     ];

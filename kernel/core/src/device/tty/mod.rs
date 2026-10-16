@@ -97,6 +97,13 @@ impl<D> Tty<D> {
         &self.driver
     }
 
+    // K1 MUSE Book --- (publish 1080p cell geometry on the default VT)
+    /// Updates the line-discipline window size (`TIOCGWINSZ` / `TIOCSWINSZ`).
+    pub(super) fn set_window_size(&self, winsize: termio::CWinSize) {
+        self.ldisc.lock().set_window_size(winsize);
+    }
+    // K1 MUSE Book ---
+
     /// Returns whether new characters can be pushed into the input buffer.
     ///
     /// This method should return `false` if the input buffer is full.

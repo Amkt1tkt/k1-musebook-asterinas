@@ -121,6 +121,27 @@ pub(crate) fn can_sync_dma() -> bool {
     true
 }
 
+// K1 MUSE Book --- (arch-neutral DMA helpers used by generic mm)
+/// The current ARM PTE implementation encodes `Uncacheable` as Device memory.
+pub(crate) fn can_map_uncacheable() -> bool {
+    true
+}
+
+/// Exclusive physical-address limit of the conservative 32-bit DMA pool.
+pub(crate) fn dma_addr_limit() -> Paddr {
+    0x1_0000_0000
+}
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (order normal memory and device MMIO at DMA publication)
+// The full-system domain includes external devices and non-shareable mappings.
+pub(crate) fn dma_io_fence() {
+    // SAFETY: This baseline architecture barrier neither accesses memory nor
+    // changes register ownership. Omitting `nomem` also orders compiler accesses.
+    unsafe { core::arch::asm!("dmb sy", options(nostack, preserves_flags)) };
+}
+// K1 MUSE Book ---
+
 /// # Safety
 ///
 /// The caller must ensure that

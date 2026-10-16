@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: resolve the selected runtime Java through PATH.
+# The default is a command name; checking it as a relative file rejects a
+# valid Java installation. Explicit Java/JDK paths retain their precedence.
+
+--- a/src/share/bin/jtreg.sh
++++ b/src/share/bin/jtreg.sh
+@@ -138,10 +138,14 @@
+     driveDir=mnt
+ fi
+ 
+-if [ ! -e "$JTREG_JAVA" ]; then
++# K1 MUSE Book --- (the runtime Java may be selected by name from PATH)
++# if [ ! -e "$JTREG_JAVA" ]; then
++if ! java_command=$(command -v "$JTREG_JAVA"); then
+     echo "No java executable at $JTREG_JAVA"
+     exit 1;
+ fi
++JTREG_JAVA="$java_command"
++# K1 MUSE Book ---
+ 
+ # Verify java version 11 or newer used to run jtreg
+ version=`"$JTREG_JAVA" -classpath "${JTREG_HOME}/lib/jtreg.jar" com.sun.javatest.regtest.agent.GetSystemProperty java.version 2>&1 |

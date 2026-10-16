@@ -88,7 +88,10 @@ fn init() -> Result<(), ComponentInitError> {
 
 // Splits the command line string by spaces but preserve
 // ones that are protected by double quotes(`"`).
-fn split_arg(input: &str) -> impl Iterator<Item = &str> {
+// K1 MUSE Book --- (early diagnostics use the same quote-aware tokenization)
+// fn split_arg(input: &str) -> impl Iterator<Item = &str> {
+pub(super) fn split_arg(input: &str) -> impl Iterator<Item = &str> {
+    // K1 MUSE Book ---
     let mut inside_quotes = false;
 
     input.split(move |c: char| {

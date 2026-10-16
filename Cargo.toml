@@ -47,6 +47,17 @@ members = [
     "kernel/core/comps/systree",
     "kernel/core/comps/time",
     "kernel/core/comps/virtio",
+    # K1 MUSE Book --- (board components live under one directory to keep out of upstream's way)
+    "kernel/core/comps/k1-musebook/cpufreq",
+    "kernel/core/comps/k1-musebook/drm",
+    "kernel/core/comps/k1-musebook/gpio",
+    "kernel/core/comps/k1-musebook/i2c",
+    "kernel/core/comps/k1-musebook/pinctrl",
+    "kernel/core/comps/k1-musebook/power",
+    "kernel/core/comps/k1-musebook/pvr",
+    "kernel/core/comps/k1-musebook/thermal",
+    "kernel/core/comps/k1-musebook/usb",
+    # K1 MUSE Book ---
     "kernel/libs/aster-bigtcp",
     "kernel/libs/aster-fuse",
     "kernel/libs/aster-rights",
@@ -102,6 +113,17 @@ default-members = [
     "kernel/core/comps/systree",
     "kernel/core/comps/time",
     "kernel/core/comps/virtio",
+    # K1 MUSE Book --- (board components; riscv64-only, see kernel/core/Cargo.toml)
+    "kernel/core/comps/k1-musebook/cpufreq",
+    "kernel/core/comps/k1-musebook/drm",
+    "kernel/core/comps/k1-musebook/gpio",
+    "kernel/core/comps/k1-musebook/i2c",
+    "kernel/core/comps/k1-musebook/pinctrl",
+    "kernel/core/comps/k1-musebook/power",
+    "kernel/core/comps/k1-musebook/pvr",
+    "kernel/core/comps/k1-musebook/thermal",
+    "kernel/core/comps/k1-musebook/usb",
+    # K1 MUSE Book ---
     "kernel/libs/aster-bigtcp",
     "kernel/libs/aster-fuse",
     "kernel/libs/aster-util",
@@ -125,6 +147,9 @@ exclude = [
     "kernel/libs/comp-sys/controlled",
     "osdk",
     "tools/sctrace",
+    # K1 MUSE Book --- (host-side PowerVR register-table generator; not a kernel target)
+    "kernel/core/comps/k1-musebook/pvr/regen",
+    # K1 MUSE Book ---
 ]
 
 [workspace.lints.rust]
@@ -189,6 +214,18 @@ aster-softirq = { path = "kernel/core/comps/softirq" }
 aster-systree = { path = "kernel/core/comps/systree" }
 aster-time = { path = "kernel/core/comps/time" }
 aster-virtio = { path = "kernel/core/comps/virtio" }
+
+# K1 MUSE Book --- (crates under kernel/core/comps/k1-musebook)
+k1-musebook-cpufreq = { path = "kernel/core/comps/k1-musebook/cpufreq" }
+k1-musebook-drm = { path = "kernel/core/comps/k1-musebook/drm" }
+k1-musebook-gpio = { path = "kernel/core/comps/k1-musebook/gpio" }
+k1-musebook-i2c = { path = "kernel/core/comps/k1-musebook/i2c" }
+k1-musebook-pinctrl = { path = "kernel/core/comps/k1-musebook/pinctrl" }
+k1-musebook-power = { path = "kernel/core/comps/k1-musebook/power" }
+k1-musebook-pvr = { path = "kernel/core/comps/k1-musebook/pvr" }
+k1-musebook-thermal = { path = "kernel/core/comps/k1-musebook/thermal" }
+k1-musebook-usb = { path = "kernel/core/comps/k1-musebook/usb" }
+# K1 MUSE Book ---
 
 # Crates under kernel/libs
 aster-bigtcp = { path = "kernel/libs/aster-bigtcp" }

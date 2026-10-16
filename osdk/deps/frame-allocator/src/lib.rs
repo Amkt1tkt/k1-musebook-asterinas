@@ -33,7 +33,10 @@ use core::alloc::Layout;
 use ostd::{
     cpu::PinCurrentCpu,
     irq,
-    mm::{Paddr, frame::GlobalFrameAllocator},
+    // K1 MUSE Book --- (return low-address frames to the bounded DMA pool)
+    //     mm::{Paddr, frame::GlobalFrameAllocator},
+    mm::{Paddr, dma_addr_limit, frame::GlobalFrameAllocator},
+    // K1 MUSE Book ---
 };
 
 mod cache;
@@ -72,10 +75,28 @@ impl GlobalFrameAllocator for FrameAllocator {
         res
     }
 
+    // K1 MUSE Book --- (bounded allocations bypass caches to enforce the address ceiling)
+    fn alloc_below(&self, layout: Layout, limit: Paddr) -> Option<Paddr> {
+        let guard = irq::disable_local();
+        let res = pools::alloc_below(&guard, layout, limit);
+        if res.is_some() {
+            TOTAL_FREE_SIZE.sub(guard.current_cpu(), layout.size());
+        }
+        res
+    }
+    // K1 MUSE Book ---
+
     fn dealloc(&self, addr: Paddr, size: usize) {
         let guard = irq::disable_local();
         TOTAL_FREE_SIZE.add(guard.current_cpu(), size);
-        cache::dealloc(&guard, addr, size);
+        // K1 MUSE Book --- (low frames return to the DMA pool, not the cache)
+        // cache::dealloc(&guard, addr, size);
+        if addr < dma_addr_limit() {
+            pools::dealloc_dma(&guard, [(addr, size)].into_iter());
+        } else {
+            cache::dealloc(&guard, addr, size);
+        }
+        // K1 MUSE Book ---
     }
 
     fn add_free_memory(&self, addr: Paddr, size: usize) {

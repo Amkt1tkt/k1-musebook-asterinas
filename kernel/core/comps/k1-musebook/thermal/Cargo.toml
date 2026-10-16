@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "k1-musebook-thermal"
+version = "0.1.0"
+edition.workspace = true
+
+# K1 MUSE Book: K1 on-die TSEN sensors and last-reset-cause dump.
+
+[dependencies]
+aster-cmdline.workspace = true
+component.workspace = true
+k1-musebook-i2c.workspace = true
+log.workspace = true
+ostd.workspace = true
+spin.workspace = true
+
+[lints]
+workspace = true

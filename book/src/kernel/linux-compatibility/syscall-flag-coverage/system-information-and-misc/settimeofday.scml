@@ -1,0 +1,4 @@
+// SPDX-License-Identifier: MPL-2.0
+// K1 MUSE Book: legacy time/timezone coverage; initial UTC setup and pointer/value constraints are described in README.md.
+
+settimeofday(tv, tz);

@@ -65,6 +65,13 @@ pub(super) struct Ext2MemoryDisk {
     segment: Segment<()>,
     flush_count: AtomicUsize,
     fail_flush: AtomicBool,
+    // K1 MUSE Book --- (exercise clean-marker durability and flush failures)
+    fail_flush_at: AtomicUsize,
+    write_count: AtomicUsize,
+    flush_states: SpinLock<Vec<u16>>,
+    watched_payload: SpinLock<Option<Vec<u8>>>,
+    flush_payload_seen: SpinLock<Vec<bool>>,
+    // K1 MUSE Book ---
 }
 
 impl Ext2MemoryDisk {
@@ -78,8 +85,41 @@ impl Ext2MemoryDisk {
             segment,
             flush_count: AtomicUsize::new(0),
             fail_flush: AtomicBool::new(false),
+            // K1 MUSE Book --- (test-only flush fault injection)
+            fail_flush_at: AtomicUsize::new(0),
+            write_count: AtomicUsize::new(0),
+            flush_states: SpinLock::new(Vec::new()),
+            watched_payload: SpinLock::new(None),
+            flush_payload_seen: SpinLock::new(Vec::new()),
+            // K1 MUSE Book ---
         }
     }
+
+    // K1 MUSE Book --- (observe the state at each persistence barrier)
+    pub(super) fn write_count(&self) -> usize {
+        self.write_count.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn reset_flush_trace(&self, fail_at: usize) {
+        self.flush_count.store(0, Ordering::Relaxed);
+        self.fail_flush_at.store(fail_at, Ordering::Relaxed);
+        self.flush_states.lock().clear();
+        self.flush_payload_seen.lock().clear();
+    }
+
+    pub(super) fn watch_payload(&self, payload: &[u8]) {
+        assert!(!payload.is_empty());
+        *self.watched_payload.lock() = Some(payload.to_vec());
+    }
+
+    pub(super) fn flush_payload_seen(&self) -> Vec<bool> {
+        self.flush_payload_seen.lock().clone()
+    }
+
+    pub(super) fn flush_states(&self) -> Vec<u16> {
+        self.flush_states.lock().clone()
+    }
+    // K1 MUSE Book ---
 
     pub(super) fn segment(&self) -> &Segment<()> {
         &self.segment
@@ -109,8 +149,32 @@ impl Debug for Ext2MemoryDisk {
 impl BlockDevice for Ext2MemoryDisk {
     fn enqueue(&self, bio: SubmittedBio) -> core::result::Result<(), BioEnqueueError> {
         if bio.type_() == BioType::Flush {
-            self.flush_count.fetch_add(1, Ordering::Relaxed);
-            let status = if self.fail_flush.load(Ordering::Relaxed) {
+            // K1 MUSE Book --- (snapshot dirty/clean state as the device flushes)
+            // self.flush_count.fetch_add(1, Ordering::Relaxed);
+            let count = self.flush_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let state = self
+                .segment
+                .read_val::<RawSuperBlock>(SUPER_BLOCK_OFFSET)
+                .unwrap()
+                .state;
+            self.flush_states.lock().push(state);
+            // This test disk is at most a few MiB. Observe whether unsynced
+            // file data has reached the raw device at each flush boundary.
+            let expected = self.watched_payload.lock().clone();
+            if let Some(expected) = expected {
+                let mut bytes = vec![0u8; self.segment.size()];
+                self.segment.read_bytes(0, &mut bytes).unwrap();
+                self.flush_payload_seen.lock().push(
+                    bytes
+                        .windows(expected.len())
+                        .any(|part| part == expected.as_slice()),
+                );
+            }
+            // let status = if self.fail_flush.load(Ordering::Relaxed) {
+            let status = if self.fail_flush.load(Ordering::Relaxed)
+                || count == self.fail_flush_at.load(Ordering::Relaxed)
+            {
+                // K1 MUSE Book ---
                 BioStatus::IoError
             } else {
                 BioStatus::Complete
@@ -119,6 +183,11 @@ impl BlockDevice for Ext2MemoryDisk {
             return Ok(());
         }
 
+        // K1 MUSE Book --- (read-only regressions observe real submitted write requests)
+        if bio.type_() == BioType::Write {
+            self.write_count.fetch_add(1, Ordering::Relaxed);
+        }
+        // K1 MUSE Book ---
         let mut cur_device_ofs = bio.sid_range().start.to_raw() as usize * SECTOR_SIZE;
 
         for seg in bio.segments() {
@@ -716,6 +785,12 @@ impl Ext2FixtureBuilder {
     }
 
     pub(super) fn build(self) -> Result<Ext2Fixture> {
+        // K1 MUSE Book --- (share fixture construction with read-only mount tests)
+        self.build_with_flags(FsFlags::empty())
+    }
+
+    pub(super) fn build_with_flags(self, flags: FsFlags) -> Result<Ext2Fixture> {
+        // K1 MUSE Book ---
         let (_, sb, descs, disk, layout) = self.prepare()?;
         self.write_bitmaps(&sb, &descs, &disk, &layout);
 
@@ -728,7 +803,10 @@ impl Ext2FixtureBuilder {
         let device: Arc<dyn BlockDevice> = self
             .custom_device
             .unwrap_or_else(|| disk.clone() as Arc<dyn BlockDevice>);
-        let ext2 = Ext2::open(device, FsFlags::empty(), None)?;
+        // K1 MUSE Book --- (test initial read-only versus writable mount episodes)
+        // let ext2 = Ext2::open(device, FsFlags::empty(), None)?;
+        let ext2 = Ext2::open(device, flags, None)?;
+        // K1 MUSE Book ---
 
         Ok(Ext2Fixture {
             disk,

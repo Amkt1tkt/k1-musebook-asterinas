@@ -5,8 +5,13 @@ use core::{fmt::Debug, marker::PhantomData, mem::ManuallyDrop, ops::Range};
 use super::util::{
     alloc_kva, cvm_need_private_protection, prepare_dma, split_daddr, unprepare_dma,
 };
+// K1 MUSE Book --- (preserve CPU-uncached mappings alongside upstream bounce-buffer synchronization)
+//     arch::{irq, mm::can_sync_dma},
 use crate::{
-    arch::{irq, mm::can_sync_dma},
+    arch::{
+        irq,
+        mm::{can_map_uncacheable, can_sync_dma},
+    },
     error::Error,
     mm::{
         Daddr, FrameAllocOptions, HasDaddr, HasPaddr, HasPaddrRange, HasSize, Infallible,
@@ -16,6 +21,7 @@ use crate::{
         paddr_to_vaddr,
     },
 };
+// K1 MUSE Book ---
 
 /// [`DmaDirection`] limits the data flow direction of [`DmaStream`] and
 /// prevents users from reading and writing to [`DmaStream`] unexpectedly.
@@ -82,6 +88,10 @@ pub struct DmaStream<D: DmaDirection = FromAndToDevice> {
     inner: Inner,
     map_daddr: Option<Daddr>,
     is_cache_coherent: bool,
+    // K1 MUSE Book --- (uncached streaming DMA: CPU mapping is never cached)
+    /// Whether the CPU reaches this memory through an uncacheable mapping.
+    cpu_uncached: bool,
+    // K1 MUSE Book ---
     _phantom: PhantomData<D>,
 }
 
@@ -90,8 +100,22 @@ enum Inner {
     Segment(USegment),
     Kva(KVirtArea, Paddr),
     Both(KVirtArea, Paddr, USegment),
+    // K1 MUSE Book --- (DMA-zone copy when the caller's frames sit above the 32-bit limit)
+    /// A DMA-zone copy the device reads and writes, plus the frames the
+    /// caller handed us. Tuple is (bounce, origin).
+    Bounce(USegment, USegment),
+    // K1 MUSE Book ---
 }
 
+// K1 MUSE Book --- (preserve CPU-uncached mappings alongside upstream bounce-buffer synchronization)
+//         let (inner, paddr) = if (can_sync_dma() || is_cache_coherent) && !cvm {
+//         } else {
+//             let (kva, paddr) = alloc_kva(size / PAGE_SIZE, can_sync_dma() || is_cache_coherent)?;
+//
+//             (Inner::Both(kva, paddr, segment), paddr)
+//     /// The caller must ensure that `byte_range` is inbound.
+//         if self.is_cache_coherent {
+//                     // The KVA is mapped as uncachable.
 impl<D: DmaDirection> DmaStream<D> {
     /// Allocates a region of physical memory for streaming DMA access.
     ///
@@ -139,6 +163,9 @@ impl<D: DmaDirection> DmaStream<D> {
         let (inner, paddr_range) = if (can_sync_dma() || is_cache_coherent) && !cvm {
             let segment: USegment = FrameAllocOptions::new()
                 .zeroed(false)
+                // K1 MUSE Book --- (streaming DMA alloc must be 32-bit-reachable)
+                .dma_capable(true)
+                // K1 MUSE Book ---
                 .alloc_segment(nframes)?
                 .into();
             let paddr_range = segment.paddr_range();
@@ -157,9 +184,57 @@ impl<D: DmaDirection> DmaStream<D> {
             inner,
             map_daddr,
             is_cache_coherent,
+            cpu_uncached: false,
             _phantom: PhantomData,
         })
     }
+
+    // K1 MUSE Book --- (K1 GPU firmware completion words need an uncached CPU mapping)
+    /// Allocates a region the CPU reaches through an **uncacheable** mapping.
+    ///
+    /// Device-written completion words can be polled without a cache operation
+    /// for each read. On RISC-V this requests Svpbmt PBMT_NC (non-cacheable
+    /// main memory). Check [`Self::is_cpu_uncached`] before relying on that
+    /// property: the platform may not support the requested cache policy.
+    pub fn alloc_uncached(nframes: usize) -> Result<Self, Error> {
+        const { assert!(D::CAN_WRITE_TO_DEVICE) };
+
+        Self::alloc_uncached_uninit(nframes).and_then(|dma| {
+            dma.writer()?.fill_zeros(dma.size());
+            Ok(dma)
+        })
+    }
+
+    /// [`DmaStream::alloc_uncached`] without zeroing the memory first.
+    pub fn alloc_uncached_uninit(nframes: usize) -> Result<Self, Error> {
+        debug_assert!(irq::is_local_enabled());
+
+        let (kva, paddr) = alloc_kva(nframes, false)?;
+        let paddr_range = paddr..paddr + nframes * PAGE_SIZE;
+
+        // SAFETY: The physical address range is untyped DMA memory before `drop`.
+        let map_daddr = unsafe { prepare_dma(&paddr_range) };
+
+        let cpu_uncached = can_map_uncacheable();
+
+        Ok(Self {
+            inner: Inner::Kva(kva, paddr),
+            map_daddr,
+            is_cache_coherent: false,
+            cpu_uncached,
+            _phantom: PhantomData,
+        })
+    }
+
+    /// Whether the CPU reaches this memory through an uncacheable mapping.
+    ///
+    /// True only for [`DmaStream::alloc_uncached`], and only where the
+    /// hardware can honor it — on RISC-V without Svpbmt the request is
+    /// downgraded to write-back and this reports that.
+    pub fn is_cpu_uncached(&self) -> bool {
+        self.cpu_uncached
+    }
+    // K1 MUSE Book ---
 
     /// Establishes DMA stream mapping for a given [`USegment`].
     ///
@@ -174,16 +249,31 @@ impl<D: DmaDirection> DmaStream<D> {
 
         let cvm = cvm_need_private_protection();
         let size = segment.size();
+        // K1 MUSE Book --- (bounce high-bank frames into the DMA zone)
+        let above_dma_limit = segment.end_paddr() > crate::mm::dma_addr_limit();
+        let cpu_can_reach_a_plain_segment = (can_sync_dma() || is_cache_coherent) && !cvm;
 
-        let (inner, paddr) = if (can_sync_dma() || is_cache_coherent) && !cvm {
-            let paddr = segment.paddr();
-
-            (Inner::Segment(segment), paddr)
-        } else {
+        let (inner, paddr) = if !cpu_can_reach_a_plain_segment {
+            // Preserve upstream's write-back bounce mapping when explicit cache
+            // maintenance is available, including confidential-VM copies.
             let (kva, paddr) = alloc_kva(size / PAGE_SIZE, can_sync_dma() || is_cache_coherent)?;
 
             (Inner::Both(kva, paddr, segment), paddr)
+        } else if above_dma_limit {
+            let bounce: USegment = FrameAllocOptions::new()
+                .zeroed(false)
+                .dma_capable(true)
+                .alloc_segment(size / PAGE_SIZE)?
+                .into();
+            let paddr = bounce.paddr();
+
+            (Inner::Bounce(bounce, segment), paddr)
+        } else {
+            let paddr = segment.paddr();
+
+            (Inner::Segment(segment), paddr)
         };
+        // K1 MUSE Book ---
 
         let paddr_range = paddr..paddr + size;
 
@@ -194,6 +284,7 @@ impl<D: DmaDirection> DmaStream<D> {
             inner,
             map_daddr,
             is_cache_coherent,
+            cpu_uncached: false,
             _phantom: PhantomData,
         })
     }
@@ -220,6 +311,10 @@ impl<D: DmaDirection> DmaStream<D> {
     /// [`Self::sync_to_device`] method first.
     ///
     /// [`write_bytes`]: crate::mm::VmIo::write_bytes
+    // K1 MUSE Book --- (cache synchronization is distinct from MMIO publication)
+    /// Device handoff may additionally require [`super::dma_io_fence`] before
+    /// its MMIO doorbell, even when no cache operation is needed.
+    // K1 MUSE Book ---
     pub fn sync_to_device(&self, byte_range: Range<usize>) -> Result<(), Error> {
         const { assert!(D::CAN_WRITE_TO_DEVICE) };
 
@@ -231,7 +326,41 @@ impl<D: DmaDirection> DmaStream<D> {
         if byte_range.start > byte_range.end || byte_range.end > size {
             return Err(Error::InvalidArgs);
         }
+        // K1 MUSE Book --- (empty ranges must not touch an aligned cache line)
+        if byte_range.is_empty() {
+            return Ok(());
+        }
+        // K1 MUSE Book ---
 
+        // K1 MUSE Book --- (a DMA-zone bounce copies even for a coherent device)
+        if let Inner::Bounce(bounce, origin) = &self.inner {
+            let va = paddr_to_vaddr(bounce.paddr());
+            let range = va + byte_range.start..va + byte_range.end;
+
+            if is_from_device && !self.is_cache_coherent {
+                // SAFETY: the validated range belongs to our DMA bounce allocation.
+                unsafe { crate::arch::mm::sync_dma_range(range.clone(), true) };
+            }
+            let (src, dst) = if is_from_device {
+                (bounce, origin)
+            } else {
+                (origin, bounce)
+            };
+            dst.writer()
+                .skip(byte_range.start)
+                .limit(byte_range.len())
+                .write(src.reader().skip(byte_range.start).limit(byte_range.len()));
+
+            if !is_from_device && !self.is_cache_coherent {
+                // SAFETY: the same validated DMA range as above.
+                unsafe { crate::arch::mm::sync_dma_range(range, false) };
+            }
+            return Ok(());
+        }
+        // K1 MUSE Book ---
+
+        // Write-back bounce mappings copy before cleaning to the device and
+        // after invalidating from the device.
         if !is_from_device && let Inner::Both(kva, _, seg) = &self.inner {
             self.sync_via_copying(byte_range.clone(), false, seg, kva);
         }
@@ -248,11 +377,18 @@ impl<D: DmaDirection> DmaStream<D> {
 
     /// # Safety
     ///
-    /// The caller must ensure that `byte_range` is inbound.
+    // K1 MUSE Book --- (the DMA-zone bounce is synchronized before this helper)
+    // /// The caller must ensure that `byte_range` is inbound.
+    /// The caller must ensure that `byte_range` is inbound and a DMA-zone Bounce
+    /// was already handled by `sync_impl`.
+    // K1 MUSE Book ---
     unsafe fn sync_cache(&self, byte_range: Range<usize>, is_from_device: bool) {
-        if self.is_cache_coherent {
+        // K1 MUSE Book --- (explicit uncacheable streams need no cache operation)
+        // if self.is_cache_coherent {
+        if self.is_cache_coherent || self.cpu_uncached {
             return;
         }
+        // K1 MUSE Book ---
 
         let va_range = match &self.inner {
             Inner::Segment(segment) => {
@@ -261,11 +397,14 @@ impl<D: DmaDirection> DmaStream<D> {
             }
             Inner::Kva(kva, _) | Inner::Both(kva, _, _) => {
                 if !can_sync_dma() {
-                    // The KVA is mapped as uncachable.
+                    // The KVA is mapped as uncacheable.
                     return;
                 }
                 kva.range()
             }
+            // K1 MUSE Book --- (copy and maintenance handled before this helper)
+            Inner::Bounce(..) => unreachable!(),
+            // K1 MUSE Book ---
         };
         let range = va_range.start + byte_range.start..va_range.start + byte_range.end;
 
@@ -313,19 +452,23 @@ impl<D: DmaDirection> DmaStream<D> {
             .write(reader.skip(skip).limit(limit));
     }
 }
+// K1 MUSE Book ---
 
 impl<D: DmaDirection> Split for DmaStream<D> {
+    // K1 MUSE Book --- (preserve CPU-uncached mappings alongside upstream bounce-buffer synchronization)
+    //         let (inner, map_daddr, is_cache_coherent) = {
     fn split(self, offset: usize) -> (Self, Self) {
         assert!(offset.is_multiple_of(PAGE_SIZE));
         assert!(0 < offset && offset < self.size());
 
-        let (inner, map_daddr, is_cache_coherent) = {
+        let (inner, map_daddr, is_cache_coherent, cpu_uncached) = {
             let this = ManuallyDrop::new(self);
             (
                 // SAFETY: `this.inner` will never be used or dropped later.
                 unsafe { core::ptr::read(&this.inner as *const Inner) },
                 this.map_daddr,
                 this.is_cache_coherent,
+                this.cpu_uncached,
             )
         };
 
@@ -345,6 +488,11 @@ impl<D: DmaDirection> Split for DmaStream<D> {
                 let (s1, s2) = segment.split(offset);
                 (Inner::Both(kva1, paddr1, s1), Inner::Both(kva2, paddr2, s2))
             }
+            Inner::Bounce(bounce, origin) => {
+                let (b1, b2) = bounce.split(offset);
+                let (o1, o2) = origin.split(offset);
+                (Inner::Bounce(b1, o1), Inner::Bounce(b2, o2))
+            }
         };
 
         let (daddr1, daddr2) = split_daddr(map_daddr, offset);
@@ -354,16 +502,19 @@ impl<D: DmaDirection> Split for DmaStream<D> {
                 inner: inner1,
                 map_daddr: daddr1,
                 is_cache_coherent,
+                cpu_uncached,
                 _phantom: PhantomData,
             },
             Self {
                 inner: inner2,
                 map_daddr: daddr2,
                 is_cache_coherent,
+                cpu_uncached,
                 _phantom: PhantomData,
             },
         )
     }
+    // K1 MUSE Book ---
 }
 
 impl<D: DmaDirection> Drop for DmaStream<D> {
@@ -374,12 +525,15 @@ impl<D: DmaDirection> Drop for DmaStream<D> {
 }
 
 impl<D: DmaDirection> HasPaddr for DmaStream<D> {
+    // K1 MUSE Book --- (preserve CPU-uncached mappings alongside upstream bounce-buffer synchronization)
     fn paddr(&self) -> Paddr {
         match &self.inner {
             Inner::Segment(segment) => segment.paddr(),
             Inner::Kva(_, paddr) | Inner::Both(_, paddr, _) => *paddr, // the mapped PA, not the buffer's PA
+            Inner::Bounce(bounce, _) => bounce.paddr(),
         }
     }
+    // K1 MUSE Book ---
 }
 
 impl<D: DmaDirection> HasDaddr for DmaStream<D> {
@@ -389,6 +543,7 @@ impl<D: DmaDirection> HasDaddr for DmaStream<D> {
 }
 
 impl<D: DmaDirection> HasSize for DmaStream<D> {
+    // K1 MUSE Book --- (preserve CPU-uncached mappings alongside upstream bounce-buffer synchronization)
     fn size(&self) -> usize {
         match &self.inner {
             Inner::Segment(segment) => segment.size(),
@@ -397,19 +552,28 @@ impl<D: DmaDirection> HasSize for DmaStream<D> {
                 debug_assert_eq!(kva.size(), segment.size());
                 kva.size()
             }
+            Inner::Bounce(bounce, origin) => {
+                debug_assert_eq!(bounce.size(), origin.size());
+                origin.size()
+            }
         }
     }
+    // K1 MUSE Book ---
 }
 
 impl<D: DmaDirection> HasVmReaderWriter for DmaStream<D> {
     type Types = VmReaderWriterResult;
 
+    // K1 MUSE Book --- (preserve CPU-uncached mappings alongside upstream bounce-buffer synchronization)
+    //             Inner::Segment(seg) | Inner::Both(_, _, seg) => Ok(seg.reader()),
     fn reader(&self) -> Result<VmReader<'_, Infallible>, Error> {
         if !D::CAN_READ_FROM_DEVICE {
             return Err(Error::AccessDenied);
         }
         match &self.inner {
-            Inner::Segment(seg) | Inner::Both(_, _, seg) => Ok(seg.reader()),
+            Inner::Segment(seg) | Inner::Both(_, _, seg) | Inner::Bounce(_, seg) => {
+                Ok(seg.reader())
+            }
             Inner::Kva(kva, _) => {
                 // SAFETY:
                 //  - Although the memory range points to typed memory, the range is for DMA
@@ -425,13 +589,18 @@ impl<D: DmaDirection> HasVmReaderWriter for DmaStream<D> {
             }
         }
     }
+    // K1 MUSE Book ---
 
+    // K1 MUSE Book --- (preserve CPU-uncached mappings alongside upstream bounce-buffer synchronization)
+    //             Inner::Segment(seg) | Inner::Both(_, _, seg) => Ok(seg.writer()),
     fn writer(&self) -> Result<VmWriter<'_, Infallible>, Error> {
         if !D::CAN_WRITE_TO_DEVICE {
             return Err(Error::AccessDenied);
         }
         match &self.inner {
-            Inner::Segment(seg) | Inner::Both(_, _, seg) => Ok(seg.writer()),
+            Inner::Segment(seg) | Inner::Both(_, _, seg) | Inner::Bounce(_, seg) => {
+                Ok(seg.writer())
+            }
             Inner::Kva(kva, _) => {
                 // SAFETY:
                 //  - Although the memory range points to typed memory, the range is for DMA
@@ -447,4 +616,5 @@ impl<D: DmaDirection> HasVmReaderWriter for DmaStream<D> {
             }
         }
     }
+    // K1 MUSE Book ---
 }

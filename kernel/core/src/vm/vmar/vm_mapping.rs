@@ -371,12 +371,20 @@ impl VmMapping {
 
 impl VmMapping {
     /// Handles a page fault.
+    // K1 MUSE Book --- (GEM mmap faults return PageFaultFailure so SIGBUS can be chosen)
+    // pub(super) fn handle_page_fault(
+    //     &self,
+    //     vm_space: &VmSpace,
+    //     page_fault_info: &PageFaultInfo,
+    //     rss_delta: &mut RssDelta,
+    // ) -> Result<()> {
     pub(super) fn handle_page_fault(
         &self,
         vm_space: &VmSpace,
         page_fault_info: &PageFaultInfo,
         rss_delta: &mut RssDelta,
-    ) -> Result<()> {
+    ) -> core::result::Result<(), super::PageFaultFailure> {
+        // K1 MUSE Book ---
         self.check_perms_for_page_fault(page_fault_info)?;
 
         let page_aligned_addr = page_fault_info.address.align_down(PAGE_SIZE);
@@ -406,25 +414,47 @@ impl VmMapping {
                 }
             }
 
-            return res;
+            // K1 MUSE Book --- (ordinary faults retain their exception signal)
+            // return res;
+            return res.map_err(super::PageFaultFailure::from);
+            // K1 MUSE Book ---
         } else if let MappedMemory::Device(ref mapped_obj) = self.mapped_mem {
+            // K1 MUSE Book --- (device RAM faults can request SIGBUS)
+            let mut fault_signal = super::PageFaultSignal::FromException;
+            // K1 MUSE Book ---
             let handle = MapHandle {
                 vm_mapping: self,
                 vm_space,
                 rss_delta,
+                // K1 MUSE Book --- (fault-only context; absent during mmap)
+                fault_info: Some(page_fault_info),
+                fault_signal: Some(&mut fault_signal),
+                // K1 MUSE Book ---
             };
 
             let res = mapped_obj.handle_page_fault(page_aligned_addr - self.map_to_addr(), handle);
 
-            return res;
+            // K1 MUSE Book --- (preserve the handler's signal as well as errno)
+            // return res;
+            return res.map_err(|err| super::PageFaultFailure::new(err, fault_signal));
+            // K1 MUSE Book ---
         }
 
+        // K1 MUSE Book --- (ordinary faults stay FromException)
+        // self.handle_single_page_fault(
+        //     vm_space,
+        //     page_aligned_addr,
+        //     page_fault_info.required_perms,
+        //     rss_delta,
+        // )
         self.handle_single_page_fault(
             vm_space,
             page_aligned_addr,
             page_fault_info.required_perms,
             rss_delta,
         )
+        .map_err(super::PageFaultFailure::from)
+        // K1 MUSE Book ---
     }
 
     fn check_perms_for_page_fault(&self, page_fault_info: &PageFaultInfo) -> Result<()> {
@@ -841,17 +871,27 @@ impl VmMapping {
 
     /// Change the perms of the mapping.
     pub(super) fn protect(self, vm_space: &VmSpace, perms: VmPerms) -> Self {
+        // K1 MUSE Book --- (demand-paged RAM must fault before becoming writable)
+        // Original upstream comment (applies to eager device mappings):
         // For device mappings, they're shared as we have checked that when
         // creating the mapping. Additionally, we need to keep the page flags
         // in sync with the mapping to avoid handling a write page fault on a
         // read-only page, which is not yet supported.
+        //
+        // Eager device mappings need page flags kept in sync with the mapping,
+        // since their default handler cannot resolve a later write fault.
+        // Demand-paged device RAM instead opts into write faults for COW and
+        // device write notifications.
         //
         // Otherwise, we should never convert a page to a writable page:
         //  - For private mappings, we may need to perform Copy-On-Write (COW)
         //    before doing so.
         //  - For shared mappings, the page may need to be marked as a dirty
         //    page in the page cache.
-        let new_flags = if matches!(self.mapped_mem, MappedMemory::Device(_)) {
+        // let new_flags = if matches!(self.mapped_mem, MappedMemory::Device(_)) {
+        let new_flags = if matches!(&self.mapped_mem, MappedMemory::Device(object) if !object.needs_write_faults())
+        {
+            // K1 MUSE Book ---
             PageFlags::from(perms)
         } else {
             PageFlags::from(perms) - PageFlags::W
@@ -861,7 +901,19 @@ impl VmMapping {
         let range = self.range();
         let mut cursor = vm_space.cursor_mut(&preempt_guard, &range).unwrap();
 
-        let op = |flags: &mut PageFlags, _cache: &mut CachePolicy| *flags = new_flags;
+        // K1 MUSE Book --- (retain only the private-device-copy software bit)
+        // let op = |flags: &mut PageFlags, _cache: &mut CachePolicy| *flags = new_flags;
+        let demand_paged =
+            matches!(&self.mapped_mem, MappedMemory::Device(object) if object.needs_write_faults());
+        let op = |flags: &mut PageFlags, _cache: &mut CachePolicy| {
+            let private_copy = if demand_paged {
+                *flags & super::on_demand::PRIVATE_COPY
+            } else {
+                PageFlags::empty()
+            };
+            *flags = new_flags | private_copy;
+        };
+        // K1 MUSE Book ---
         while cursor.virt_addr() < range.end {
             if let Some(va) = cursor.protect_next(range.end - cursor.virt_addr(), op) {
                 cursor.flusher().issue_tlb_flush(TlbFlushOp::for_range(va));
@@ -890,11 +942,18 @@ pub(super) enum MappedMemory {
     /// population is possible by enabling page fault handlers to allocate pages and read the page
     /// content from the disk.
     Vmo(MappedVmo),
+    // K1 MUSE Book --- (device mappings may also populate pages on demand)
+    // Original upstream documentation:
+    // /// Device memory.
+    // ///
+    // /// These pages are associated with special files (typically device memory). They are populated
+    // /// when the memory mapping is created via mmap, instead of occurring at page faults.
     /// Device memory.
     ///
-    /// These pages are associated with special files (typically device memory). They are populated
-    /// when the memory mapping is created via mmap, instead of occurring at page faults.
+    /// These pages are associated with special files. The device may populate them during mmap
+    /// or resolve faults through its owned mapping object.
     Device(Box<dyn MappedObject>),
+    // K1 MUSE Book ---
 }
 
 impl MappedMemory {
@@ -1102,7 +1161,10 @@ fn try_merge(left: &VmMapping, right: &VmMapping) -> Option<VmMapping> {
     })
 }
 
-fn duplicate_frame(src: &UFrame) -> Result<Frame<()>> {
+// K1 MUSE Book --- (on_demand.rs copies frames on a private GEM mapping)
+// fn duplicate_frame(src: &UFrame) -> Result<Frame<()>> {
+pub(super) fn duplicate_frame(src: &UFrame) -> Result<Frame<()>> {
+    // K1 MUSE Book ---
     let new_frame = FrameAllocOptions::new().zeroed(false).alloc_frame()?;
     new_frame.writer().write(&mut src.reader());
     Ok(new_frame)
@@ -1115,10 +1177,45 @@ pub struct MapHandle<'a, 'b, 'c> {
     vm_mapping: &'a VmMapping,
     vm_space: &'a VmSpace,
     rss_delta: &'c mut RssDelta<'b>,
+    // K1 MUSE Book --- (pass the fault access and SIGBUS result to RAM device adapters)
+    fault_info: Option<&'a PageFaultInfo>,
+    fault_signal: Option<&'c mut super::PageFaultSignal>,
+    // K1 MUSE Book ---
 }
 
 impl MapHandle<'_, '_, '_> {
     pub(super) const DEVICE_RSS_TYPE: RssType = RssType::File;
+
+    // K1 MUSE Book --- (keep cache policy, COW and write notification under the page lock)
+    pub(super) fn handle_device_fault(
+        &mut self,
+        device: &super::on_demand::MappedDevice,
+    ) -> Result<()> {
+        let Some(info) = self.fault_info else {
+            return_errno_with_message!(Errno::EINVAL, "device fault context is not available");
+        };
+        match super::on_demand::handle_device_fault(
+            self.vm_space,
+            device,
+            self.vm_mapping.map_to_addr,
+            self.vm_mapping.perms,
+            self.vm_mapping.map_mode.is_shared(),
+            info.address.align_down(PAGE_SIZE),
+            info.required_perms,
+        ) {
+            Ok(num_new_pages) => {
+                self.rss_delta.add(Self::DEVICE_RSS_TYPE, num_new_pages);
+                Ok(())
+            }
+            Err(failure) => {
+                if let Some(signal) = self.fault_signal.as_deref_mut() {
+                    *signal = failure.signal();
+                }
+                Err(failure.into())
+            }
+        }
+    }
+    // K1 MUSE Book ---
 
     /// Returns the size of the target mapping in bytes.
     pub fn size(&self) -> usize {
@@ -1207,6 +1304,10 @@ impl VmMapping {
             vm_mapping: self,
             vm_space,
             rss_delta,
+            // K1 MUSE Book --- (mmap has no active fault)
+            fault_info: None,
+            fault_signal: None,
+            // K1 MUSE Book ---
         };
         let mapped_obj = mappable.map(vmo_offset, handle)?;
 

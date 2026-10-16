@@ -18,9 +18,27 @@ FN_TEST(version)
 						 _ret->date != NULL &&
 						 _ret->desc != NULL);
 
-	TEST_RES(strlen(version->name), _ret > 0 && version->name_len == _ret);
+	/* K1 MUSE Book --- (report a failed library query without dereferencing it) */
+	if (version == NULL || version->name == NULL || version->date == NULL ||
+	    version->desc == NULL) {
+		if (version != NULL)
+			drmFreeVersion(version);
+		__TEST_SUMMARY();
+		return;
+	}
+	/* K1 MUSE Book --- */
+
+	/* K1 MUSE Book --- (validate libdrm's signed lengths before comparison) */
+	/* TEST_RES(strlen(version->name), _ret > 0 && version->name_len == _ret);
 	TEST_RES(strlen(version->date), _ret > 0 && version->date_len == _ret);
-	TEST_RES(strlen(version->desc), _ret > 0 && version->desc_len == _ret);
+	TEST_RES(strlen(version->desc), _ret > 0 && version->desc_len == _ret); */
+	TEST_RES(strlen(version->name),
+		 version->name_len > 0 && (size_t)version->name_len == _ret);
+	TEST_RES(strlen(version->date),
+		 version->date_len > 0 && (size_t)version->date_len == _ret);
+	TEST_RES(strlen(version->desc),
+		 version->desc_len > 0 && (size_t)version->desc_len == _ret);
+	/* K1 MUSE Book --- */
 	drmFreeVersion(version);
 }
 END_TEST()

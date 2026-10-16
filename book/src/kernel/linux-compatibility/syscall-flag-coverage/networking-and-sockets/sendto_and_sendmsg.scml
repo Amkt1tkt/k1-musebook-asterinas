@@ -1,3 +1,7 @@
+// K1 MUSE Book --- (per-call nonblocking sends and SIGPIPE suppression)
+send_flags = MSG_DONTWAIT | MSG_NOSIGNAL;
+// K1 MUSE Book ---
+
 struct sockaddr = {
     sa_family = AF_INET | AF_UNIX | AF_NETLINK | AF_VSOCK,
     ..
@@ -9,15 +13,40 @@ struct msg_hdr = {
     ..
 };
 
+// K1 MUSE Book --- (UNIX ancillary messages; socket-family and credential limits are in README.md)
+struct unix_control = {
+    cmsg_level = SOL_SOCKET,
+    cmsg_type = SCM_RIGHTS,
+    ..
+};
+struct unix_control = {
+    cmsg_level = SOL_SOCKET,
+    cmsg_type = SCM_CREDENTIALS,
+    ..
+};
+
+struct msg_hdr = {
+    msg_name = <sockaddr>,
+    msg_control = [ <unix_control> ],
+    ..
+};
+// K1 MUSE Book ---
+
 struct mmsg_hdr = {
-    hdr = <msg_hdr>,
+    // K1 MUSE Book --- (strace names the embedded header msg_hdr)
+    // hdr = <msg_hdr>,
+    msg_hdr = <msg_hdr>,
+    // K1 MUSE Book ---
     msg_len
 };
 
 // Send message on a socket
 sendto(
     sockfd, buf, len,
-    flags = 0,
+    // K1 MUSE Book --- (apply supported per-call send flags)
+    // flags = 0,
+    flags = <send_flags>,
+    // K1 MUSE Book ---
     dest_addr = <sockaddr>,
     addrlen
 );
@@ -26,7 +55,10 @@ sendto(
 sendmsg(
     sockfd,
     msg = <msg_hdr>,
-    flags = 0
+    // K1 MUSE Book --- (apply supported per-call send flags)
+    // flags = 0
+    flags = <send_flags>
+    // K1 MUSE Book ---
 );
 
 
@@ -35,5 +67,8 @@ sendmmsg(
     sockfd,
     mmsgs = [ <mmsg_hdr> ],
     mmsg_count,
-    flags = 0
+    // K1 MUSE Book --- (apply supported per-call send flags)
+    // flags = 0
+    flags = <send_flags>
+    // K1 MUSE Book ---
 );

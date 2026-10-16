@@ -8,6 +8,9 @@
 //! Reference: <https://elixir.bootlin.com/linux/v6.17/source/include/uapi/linux/major.h>
 
 mod file;
+// K1 MUSE Book --- (publish /sys/class/input so libudev can enumerate evdev)
+mod input_class;
+// K1 MUSE Book ---
 
 use alloc::format;
 use core::{
@@ -240,6 +243,16 @@ impl InputHandlerClass for EvdevHandlerClass {
         // Register the device with the char device subsystem.
         register(evdev.clone()).map_err(|_| ConnectError::InternalError)?;
 
+        // K1 MUSE Book --- (libudev enumerates /sys/class/input; failure leaves /dev usable)
+        if let Err(err) = input_class::register(evdev.id(), dev.as_ref()) {
+            ostd::warn!(
+                "Failed to publish evdev device '{}' in sysfs: {:?}",
+                dev.name(),
+                err
+            );
+        }
+        // K1 MUSE Book ---
+
         // Add to our registry for looking up during disconnection.
         EVDEV_DEVICES.lock().insert(minor_id, evdev.clone());
 
@@ -281,7 +294,12 @@ impl InputHandlerClass for EvdevHandlerClass {
             );
         }
 
+        // K1 MUSE Book --- (sysfs entries outlive the device until node deletion exists)
         // TODO: Implement device node deletion when the functionality is available.
+        // The sysfs entries outlive the device for the same reason: removing
+        // them without removing the node would leave user space able to open a
+        // device it can no longer describe.
+        // K1 MUSE Book ---
         ostd::info!(
             "Disconnected evdev device '{}' (minor: {}), device node /dev/input/event{} still exists",
             device_name,

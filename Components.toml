@@ -20,5 +20,16 @@ systree = { name = "aster-systree" }
 time = { name = "aster-time" }
 uart = { name = "aster-uart" }
 virtio = { name = "aster-virtio" }
+# K1 MUSE Book --- (board components under kernel/core/comps/k1-musebook)
+k1-cpufreq = { name = "k1-musebook-cpufreq" }
+k1-drm = { name = "k1-musebook-drm" }
+k1-gpio = { name = "k1-musebook-gpio" }
+k1-i2c = { name = "k1-musebook-i2c" }
+k1-pinctrl = { name = "k1-musebook-pinctrl" }
+k1-power = { name = "k1-musebook-power" }
+k1-pvr = { name = "k1-musebook-pvr" }
+k1-thermal = { name = "k1-musebook-thermal" }
+k1-usb = { name = "k1-musebook-usb" }
+# K1 MUSE Book ---
 
 [whitelist]

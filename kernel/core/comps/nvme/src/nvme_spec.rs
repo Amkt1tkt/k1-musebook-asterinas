@@ -5,7 +5,10 @@
 //! Refer to NVM Express Base Specification Revision 2.0, Section 3.3.3
 
 use aster_util::{field_ptr, safe_ptr::SafePtr};
-use ostd::mm::dma::DmaCoherent;
+// K1 MUSE Book --- (use the streaming DMA owner for Identify data)
+// use ostd::mm::dma::DmaCoherent;
+use ostd::mm::dma::DmaStream;
+// K1 MUSE Book ---
 
 /// Submission Queue Entry (SQE).
 ///
@@ -118,12 +121,20 @@ impl NvmeCommand {
 
 impl NvmeCompletion {
     /// Reads the phase tag (P) from a completion queue slot.
-    pub(crate) fn read_phase_tag(ring_slot_ptr: &SafePtr<NvmeCompletion, &DmaCoherent>) -> bool {
+    // K1 MUSE Book --- (CQ rings are DmaStream on non-coherent platforms)
+    // pub(crate) fn read_phase_tag(ring_slot_ptr: &SafePtr<NvmeCompletion, &DmaCoherent>) -> bool {
+    //     let status = field_ptr!(ring_slot_ptr, NvmeCompletion, status)
+    //         .read_once()
+    //         .expect("CQ status field must be valid within allocated DMA ring");
+    //     (status & 1) != 0
+    // }
+    pub(crate) fn read_phase_tag(ring_slot_ptr: &SafePtr<NvmeCompletion, &DmaStream>) -> bool {
         let status = field_ptr!(ring_slot_ptr, NvmeCompletion, status)
             .read_once()
             .expect("CQ status field must be valid within allocated DMA ring");
         (status & 1) != 0
     }
+    // K1 MUSE Book ---
 
     /// Returns the completion entry SQ head pointer.
     pub(crate) fn sq_head(&self) -> u16 {

@@ -130,6 +130,17 @@ fn cow_copy_pt(src: &mut CursorMut<'_>, dst: &mut CursorMut<'_>, size: usize) ->
     num_copied
 }
 
+// K1 MUSE Book --- (exercise production fork flags in device-COW regressions)
+#[cfg(ktest)]
+pub(in crate::vm::vmar) fn cow_copy_pt_for_test(
+    src: &mut CursorMut<'_>,
+    dst: &mut CursorMut<'_>,
+    size: usize,
+) -> usize {
+    cow_copy_pt(src, dst, size)
+}
+// K1 MUSE Book ---
+
 #[cfg(ktest)]
 mod test {
     use ostd::{
@@ -161,7 +172,10 @@ mod test {
         // Confirms the initial mapping.
         assert!(matches!(
             vm_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::RW
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::RW
+            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::RW
+            // K1 MUSE Book ---
         ));
 
         // Creates a child page table with copy-on-write protection.
@@ -204,7 +218,10 @@ mod test {
         // Confirms that the child VA remains mapped.
         assert!(matches!(
             child_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::R
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::R
+            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::R
+            // K1 MUSE Book ---
         ));
 
         // Creates a sibling page table (from the now-modified parent).
@@ -234,7 +251,10 @@ mod test {
         // Confirms that the child VA remains mapped after the parent is dropped.
         assert!(matches!(
             child_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::R
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::R
+            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::R
+            // K1 MUSE Book ---
         ));
 
         // Unmaps the range from the child.
@@ -252,7 +272,10 @@ mod test {
         // Confirms that the sibling mapping points back to the original frame's physical address.
         assert!(matches!(
             sibling_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::RW
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && prop.flags == PageFlags::RW
+            (va, Some(VmQueriedItem::MappedRam { frame, prop }))  if va.start == map_range.start && frame.paddr() == paddr && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::RW
+            // K1 MUSE Book ---
         ));
 
         // Confirms that the child remains unmapped.
@@ -290,7 +313,10 @@ mod test {
         // Confirms the initial mapping.
         assert!(matches!(
             vm_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::RW
+            // K1 MUSE Book ---
         ));
 
         // Creates a child page table with copy-on-write protection.
@@ -339,7 +365,10 @@ mod test {
         // Confirms that the child VA remains mapped.
         assert!(matches!(
             child_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::RW
+            // K1 MUSE Book ---
         ));
 
         // Creates a sibling page table (from the now-modified parent).
@@ -369,7 +398,10 @@ mod test {
         // Confirms that the child VA remains mapped after the parent is dropped.
         assert!(matches!(
             child_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::RW
+            // K1 MUSE Book ---
         ));
 
         // Unmaps the range from the child.
@@ -387,7 +419,10 @@ mod test {
         // Confirms that the sibling mapping points back to the original `IoMem`'s physical address.
         assert!(matches!(
             sibling_space.cursor(&preempt_guard, &map_range).unwrap().query().unwrap(),
-            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            // K1 MUSE Book --- (RISC-V eagerly sets accessed/dirty PTE bits)
+            // (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && prop.flags == PageFlags::RW
+            (va, Some(VmQueriedItem::MappedIoMem { paddr, prop }))  if va.start == map_range.start && paddr == IOMEM_PADDR && (prop.flags - (PageFlags::ACCESSED | PageFlags::DIRTY)) == PageFlags::RW
+            // K1 MUSE Book ---
         ));
 
         // Confirms that the child remains unmapped.

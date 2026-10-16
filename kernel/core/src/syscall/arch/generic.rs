@@ -10,6 +10,7 @@
 /// By moving these use statements into this dedicated macro, they can be correctly formatted.
 macro_rules! import_generic_syscall_entries {
     () => {
+        // K1 MUSE Book --- (wire wall-clock setters into the generic syscall table)
         use $crate::syscall::{
             accept::{sys_accept, sys_accept4},
             access::{sys_faccessat, sys_faccessat2},
@@ -22,6 +23,7 @@ macro_rules! import_generic_syscall_entries {
             chown::{sys_fchown, sys_fchownat},
             chroot::sys_chroot,
             clock_gettime::sys_clock_gettime,
+            clock_settime::sys_clock_settime,
             clone::{sys_clone, sys_clone3},
             close::{sys_close, sys_close_range},
             connect::sys_connect,
@@ -149,6 +151,7 @@ macro_rules! import_generic_syscall_entries {
             setreuid::sys_setreuid,
             setsid::sys_setsid,
             setsockopt::sys_setsockopt,
+            settimeofday::sys_settimeofday,
             setuid::sys_setuid,
             setxattr::{sys_fsetxattr, sys_lsetxattr, sys_setxattr},
             shutdown::sys_shutdown,
@@ -179,6 +182,7 @@ macro_rules! import_generic_syscall_entries {
             waitid::sys_waitid,
             write::sys_write,
         };
+        // K1 MUSE Book ---
     };
 }
 
@@ -202,6 +206,7 @@ pub(super) use import_generic_syscall_entries;
 ///     SYS_EXAMPLE2 = 501 => sys_example2(args[..1], &user_ctx);
 /// }
 /// ```
+// K1 MUSE Book --- (wire wall-clock setters into the generic syscall table)
 macro_rules! define_syscalls_with_generic_syscall_table {
     ( $( $name: ident = $num: literal => $handler: ident $args: tt );* $(;)? ) => {
         generic::import_generic_syscall_entries!();
@@ -300,6 +305,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_TIMER_GETTIME = 108          => sys_timer_gettime(args[..2]);
             SYS_TIMER_SETTIME = 110          => sys_timer_settime(args[..4]);
             SYS_TIMER_DELETE = 111           => sys_timer_delete(args[..1]);
+            SYS_CLOCK_SETTIME = 112          => sys_clock_settime(args[..2]);
             SYS_CLOCK_GETTIME = 113          => sys_clock_gettime(args[..2]);
             SYS_CLOCK_NANOSLEEP = 115        => sys_clock_nanosleep(args[..4]);
             SYS_PTRACE = 117                 => sys_ptrace(args[..4]);
@@ -351,6 +357,7 @@ macro_rules! define_syscalls_with_generic_syscall_table {
             SYS_PRCTL = 167                  => sys_prctl(args[..5]);
             SYS_GETCPU = 168                 => sys_getcpu(args[..3]);
             SYS_GETTIMEOFDAY = 169           => sys_gettimeofday(args[..2]);
+            SYS_SETTIMEOFDAY = 170           => sys_settimeofday(args[..2]);
             SYS_GETPID = 172                 => sys_getpid(args[..0]);
             SYS_GETPPID = 173                => sys_getppid(args[..0]);
             SYS_GETUID = 174                 => sys_getuid(args[..0]);
@@ -421,5 +428,6 @@ macro_rules! define_syscalls_with_generic_syscall_table {
         }
     };
 }
+// K1 MUSE Book ---
 
 pub(super) use define_syscalls_with_generic_syscall_table;

@@ -30,6 +30,28 @@ THRE = "THRE"
 TestNG = "TestNG"
 ECT = "ECT"
 
+
+# K1 MUSE Book --- (graphics vendors, register abbreviations and system tools)
+Zink = "Zink"
+Synopsys = "Synopsys"
+subtile = "subtile"
+ARCHTYPE = "ARCHTYPE"
+ONL = "ONL"
+THR = "THR"
+hsa = "hsa"
+dbe = "dbe"
+chage = "chage"
+localed = "localed"
+vor = "vor"
+# Both spellings are used in Rust error names and documentation.
+unparseable = "unparseable"
+# K1 MUSE Book ---
+
+# K1 MUSE Book --- (the firmware ABI retains the upstream field spelling)
+[default.extend-identifiers]
+active_pm_latency_persistant = "active_pm_latency_persistant"
+# K1 MUSE Book ---
+
 # Files with svg suffix are ignored to check.
 [type.svg]
 extend-glob = ["*.svg"]

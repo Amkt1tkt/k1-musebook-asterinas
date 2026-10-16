@@ -117,6 +117,15 @@ impl fmt::Write for Pl011Uart {
     }
 }
 
+// K1 MUSE Book --- (avoid reacquiring the UART lock during a nested write)
+/// Drops nested output when the primary UART lock is already held.
+///
+/// The only PL011 register mapping belongs to `SERIAL_PORT`. There is no
+/// independent raw console, so the fallback must neither lock again nor create
+/// a second UART owner.
+pub(crate) fn write_fmt_raw(_args: fmt::Arguments) {}
+// K1 MUSE Book ---
+
 /// Initializes the serial port.
 pub(crate) fn init(early_cmdline: &EarlyCmdline) {
     if !early_cmdline.has_early_console {

@@ -14,6 +14,91 @@ use crate::{
 mod dma_coherent {
     use super::*;
 
+    // K1 MUSE Book --- (real DMA allocation/IoMem ownership and cache regressions)
+    #[ktest]
+    fn dma_iomem_alias_lifetime_regression() {
+        use crate::{
+            mm::{CachePolicy, PageFlags, PageProperty, Split, VmSpace, vm_space::VmQueriedItem},
+            task::disable_preempt,
+        };
+
+        for coherent in [false, true] {
+            let allocation = DmaCoherent::alloc(2, coherent).unwrap();
+            let expected = allocation.cpu_cache_policy();
+            let (first, second) = allocation.split(PAGE_SIZE);
+            assert_eq!(first.cpu_cache_policy(), expected);
+            assert_eq!(second.cpu_cache_policy(), expected);
+            drop(second);
+
+            let dma = Arc::new(first);
+            let weak = Arc::downgrade(&dma);
+            let alias = dma.as_iomem_alias();
+            let cloned = alias.clone();
+            let sliced = alias.slice(16..32);
+            assert_eq!(alias.cache_policy(), expected);
+            assert_eq!(sliced.cache_policy(), expected);
+            dma.write_val(16, &0x1234_5678u32).unwrap();
+            assert_eq!(sliced.read_val::<u32>(0).unwrap(), 0x1234_5678);
+            drop(dma);
+            drop(alias);
+            assert!(weak.upgrade().is_some());
+            cloned.write_val(16, &0x9876_5432u32).unwrap();
+            assert_eq!(sliced.read_val::<u32>(0).unwrap(), 0x9876_5432);
+            drop(cloned);
+            assert!(weak.upgrade().is_some());
+            drop(sliced);
+            assert!(
+                weak.upgrade().is_none(),
+                "aliases must not form an Arc cycle"
+            );
+        }
+
+        let dma = Arc::new(DmaCoherent::alloc(1, true).unwrap());
+        let weak = Arc::downgrade(&dma);
+        let alias = dma.as_iomem_alias();
+        let vmspace = VmSpace::new();
+        let range = 0x1000..0x2000;
+        let preempt_guard = disable_preempt();
+        {
+            let mut cursor = vmspace.cursor_mut(&preempt_guard, &range).unwrap();
+            // Even an incorrect caller request cannot create a DMA cache alias.
+            cursor.map_iomem(
+                alias,
+                PageProperty::new_user(PageFlags::RW, CachePolicy::Uncacheable),
+                PAGE_SIZE,
+                0,
+            );
+        }
+        {
+            let mut cursor = vmspace.cursor(&preempt_guard, &range).unwrap();
+            assert!(matches!(
+                cursor.query().unwrap().1,
+                Some(VmQueriedItem::MappedIoMem { prop, .. })
+                    if prop.cache == CachePolicy::Writeback
+            ));
+        }
+        drop(dma);
+        assert!(
+            weak.upgrade().is_some(),
+            "the VmSpace must retain DMA backing"
+        );
+        {
+            let cursor = vmspace.cursor_mut(&preempt_guard, &range).unwrap();
+            let (recovered, offset) = cursor
+                .find_iomem_by_paddr(weak.upgrade().unwrap().paddr())
+                .unwrap();
+            assert_eq!(offset, 0);
+            assert_eq!(recovered.cache_policy(), CachePolicy::Writeback);
+        }
+        drop(preempt_guard);
+        drop(vmspace);
+        assert!(
+            weak.upgrade().is_none(),
+            "the last VmSpace must release the backing"
+        );
+    }
+    // K1 MUSE Book ---
+
     #[ktest]
     fn alloc_with_coherent_device() {
         let dma_coherent = DmaCoherent::alloc(1, true).unwrap();
@@ -106,13 +191,31 @@ mod dma_coherent {
 mod dma_stream {
     use super::*;
 
+    // K1 MUSE Book --- (K1 bounce may relocate DMA when the original address is above the limit)
+    fn assert_mapped_device_addr(dma_paddr: usize, orig_paddr: usize, orig_size: usize) {
+        let limit = crate::mm::dma_addr_limit();
+        assert!(
+            dma_paddr < limit,
+            "mapped DMA address {:#x} is at or above limit {:#x}",
+            dma_paddr,
+            limit
+        );
+        if orig_paddr.saturating_add(orig_size) <= limit {
+            assert_eq!(dma_paddr, orig_paddr);
+        }
+    }
+    // K1 MUSE Book ---
+
     #[ktest]
     fn streaming_map() {
         let segment = FrameAllocOptions::new()
             .alloc_segment_with(1, |_| ())
             .unwrap();
         let dma_stream = DmaStream::<FromAndToDevice>::map(segment.clone().into(), true).unwrap();
-        assert_eq!(dma_stream.paddr(), segment.paddr());
+        // K1 MUSE Book --- (accept bounce when the original address is above the DMA limit)
+        // assert_eq!(dma_stream.paddr(), segment.paddr());
+        assert_mapped_device_addr(dma_stream.paddr(), segment.paddr(), segment.size());
+        // K1 MUSE Book ---
         assert_eq!(dma_stream.size(), PAGE_SIZE);
     }
 
@@ -158,7 +261,10 @@ mod dma_stream {
             .alloc_segment_with(1, |_| ())
             .unwrap();
         let dma_stream = DmaStream::<ToDevice>::map(segment.clone().into(), false).unwrap();
-        assert_eq!(dma_stream.paddr(), segment.paddr());
+        // K1 MUSE Book --- (accept bounce when the original address is above the DMA limit)
+        // assert_eq!(dma_stream.paddr(), segment.paddr());
+        assert_mapped_device_addr(dma_stream.paddr(), segment.paddr(), segment.size());
+        // K1 MUSE Book ---
         assert_eq!(dma_stream.size(), PAGE_SIZE);
 
         let mut buffer = [0u8; 8];
@@ -181,7 +287,10 @@ mod dma_stream {
             .alloc_segment_with(1, |_| ())
             .unwrap();
         let dma_stream = DmaStream::<FromDevice>::map(segment.clone().into(), false).unwrap();
-        assert_eq!(dma_stream.paddr(), segment.paddr());
+        // K1 MUSE Book --- (accept bounce when the original address is above the DMA limit)
+        // assert_eq!(dma_stream.paddr(), segment.paddr());
+        assert_mapped_device_addr(dma_stream.paddr(), segment.paddr(), segment.size());
+        // K1 MUSE Book ---
         assert_eq!(dma_stream.size(), PAGE_SIZE);
 
         let mut buffer = [0u8; 8];
@@ -225,6 +334,15 @@ mod dma_stream {
     fn alloc_dma_stream() {
         let dma_stream = DmaStream::<FromAndToDevice>::alloc(2, false).unwrap();
         assert_eq!(dma_stream.size(), 2 * PAGE_SIZE);
+        // K1 MUSE Book --- (alloc_below must honour dma_addr_limit)
+        assert!(
+            dma_stream.paddr() + dma_stream.size() <= crate::mm::dma_addr_limit(),
+            "DmaStream::alloc returned {:#x}..{:#x} crossing {:#x}",
+            dma_stream.paddr(),
+            dma_stream.paddr() + dma_stream.size(),
+            crate::mm::dma_addr_limit()
+        );
+        // K1 MUSE Book ---
 
         // Verify allocated memory is zeroed
         let mut buf_read = vec![1u8; 2 * PAGE_SIZE];
@@ -285,3 +403,34 @@ mod dma_stream {
         }
     }
 }
+
+// K1 MUSE Book --- (both synchronization endpoints are part of the safety bound)
+#[ktest]
+fn dma_stream_sync_range_bounds_regression() {
+    let dma = DmaStream::<FromAndToDevice>::alloc(1, true).unwrap();
+    for range in [
+        core::ops::Range { start: 2, end: 1 },
+        core::ops::Range {
+            start: 0,
+            end: PAGE_SIZE + 1,
+        },
+        core::ops::Range {
+            start: PAGE_SIZE + 1,
+            end: PAGE_SIZE + 1,
+        },
+    ] {
+        assert!(matches!(
+            dma.sync_to_device(range.clone()),
+            Err(error::Error::InvalidArgs)
+        ));
+        assert!(matches!(
+            dma.sync_from_device(range),
+            Err(error::Error::InvalidArgs)
+        ));
+    }
+    for range in [0..0, PAGE_SIZE..PAGE_SIZE, 0..PAGE_SIZE, 1..PAGE_SIZE] {
+        assert!(dma.sync_to_device(range.clone()).is_ok());
+        assert!(dma.sync_from_device(range).is_ok());
+    }
+}
+// K1 MUSE Book ---

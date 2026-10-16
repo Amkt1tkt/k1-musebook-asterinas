@@ -268,9 +268,39 @@ fn init_in_first_kthread(path_resolver: &PathResolver) {
     crate::thread::init_in_first_kthread();
     crate::fs::init_in_first_kthread(path_resolver);
     crate::device::init_in_first_kthread();
+    // K1 MUSE Book --- (firmware lives in initramfs; load after the fs is up)
+    #[cfg(target_arch = "riscv64")]
+    crate::device::load_firmware_in_first_kthread(path_resolver);
+    // K1 MUSE Book ---
     crate::net::init_in_first_kthread();
     #[cfg(not(target_arch = "loongarch64"))]
     crate::vdso::init_in_first_kthread();
+    // K1 MUSE Book --- (battery refresh + thermal/power/cpufreq sampler threads)
+    #[cfg(target_arch = "riscv64")]
+    {
+        k1_musebook_power::register_battery_publisher(crate::fs::sysfs::publish_battery);
+        let _ = k1_musebook_power::refresh();
+        ThreadOptions::new(k1_musebook_thermal::run_loop).spawn();
+        ThreadOptions::new(k1_musebook_power::run_loop).spawn();
+        #[cfg(feature = "cpufreq")]
+        ThreadOptions::new(|| {
+            let sleep_queue = ostd::sync::WaitQueue::new();
+            let sleep_duration = core::time::Duration::from_millis(1000);
+            loop {
+                k1_musebook_cpufreq::tick();
+                let _ =
+                    sleep_queue.wait_until_or_timeout(|| -> Option<()> { None }, &sleep_duration);
+            }
+        })
+        .spawn();
+    }
+    // K1 MUSE Book ---
+    // K1 MUSE Book --- (splash tick thread; ThreadOptions so it is scheduled)
+    #[cfg(target_arch = "riscv64")]
+    if aster_framebuffer::splash::is_active() {
+        ThreadOptions::new(aster_framebuffer::splash::run_loop).spawn();
+    }
+    // K1 MUSE Book ---
 }
 
 fn print_banner() {

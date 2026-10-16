@@ -90,15 +90,29 @@ impl VtManager {
 
         // Initialize default allocated VTs.
         // Reference: <https://elixir.bootlin.com/linux/v6.17/source/drivers/tty/vt/vt.c#L3741-L3749>
+        // K1 MUSE Book --- (publish real 1080p cell geometry so bash wraps correctly)
+        // for i in 0..Self::MIN_DEFAULT_ALLOCATED_VT_INDEX.get() {
+        //     terminals[i as usize].driver().vt_console().allocate();
+        // }
         for i in 0..Self::MIN_DEFAULT_ALLOCATED_VT_INDEX.get() {
-            terminals[i as usize].driver().vt_console().allocate();
+            let tty = &terminals[i as usize];
+            tty.driver().vt_console().allocate();
+            if let Some((rows, cols, xpixel, ypixel)) = tty.driver().vt_console().window_geometry()
+            {
+                tty.set_window_size(crate::device::tty::termio::CWinSize::new(
+                    rows, cols, xpixel, ypixel,
+                ));
+            }
         }
+        // K1 MUSE Book ---
 
+        // K1 MUSE Book --- (activate after splash end-callback; painting now would wipe the logo)
         // Activate the default VT.
-        terminals[Self::DEFAULT_ACTIVE_VT_INDEX.to_zero_based()]
-            .driver()
-            .vt_console()
-            .activate();
+        // terminals[Self::DEFAULT_ACTIVE_VT_INDEX.to_zero_based()]
+        //     .driver()
+        //     .vt_console()
+        //     .activate();
+        // K1 MUSE Book ---
 
         Ok(Self {
             terminals,
@@ -476,8 +490,20 @@ pub(super) static VT_MANAGER: Once<VtManager> = Once::new();
 pub(super) fn init_in_first_process() -> Result<()> {
     let vtm = VtManager::new()?;
     VT_MANAGER.call_once(|| vtm);
+    // K1 MUSE Book --- (splash ends from KMS/timeout; framebuffer cannot call VT)
+    aster_framebuffer::splash::set_on_end(on_splash_end);
+    if !aster_framebuffer::splash::is_active() {
+        on_splash_end(aster_framebuffer::splash::EndReason::Timeout);
+    }
+    // K1 MUSE Book ---
     Ok(())
 }
+
+// K1 MUSE Book --- (flush VT1 shadow when splash ends or never started)
+fn on_splash_end(_reason: aster_framebuffer::splash::EndReason) {
+    default_vt().driver().vt_console().activate();
+}
+// K1 MUSE Book ---
 
 pub(crate) fn active_vt() -> &'static Arc<Tty<VtDriver>> {
     let vtm = VT_MANAGER.get().expect("`VT_MANAGER` is not initialized");

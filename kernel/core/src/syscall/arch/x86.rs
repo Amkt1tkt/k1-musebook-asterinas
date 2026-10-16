@@ -2,6 +2,7 @@
 
 //! System call dispatch in the x86 architecture.
 
+// K1 MUSE Book --- (keep wall-clock setter dispatch consistent across architectures)
 use super::{
     accept::{sys_accept, sys_accept4},
     access::{sys_access, sys_faccessat, sys_faccessat2},
@@ -16,6 +17,7 @@ use super::{
     chown::{sys_chown, sys_fchown, sys_fchownat, sys_lchown},
     chroot::sys_chroot,
     clock_gettime::sys_clock_gettime,
+    clock_settime::sys_clock_settime,
     clone::{sys_clone, sys_clone3},
     close::{sys_close, sys_close_range},
     connect::sys_connect,
@@ -153,6 +155,7 @@ use super::{
     setreuid::sys_setreuid,
     setsid::sys_setsid,
     setsockopt::sys_setsockopt,
+    settimeofday::sys_settimeofday,
     setuid::sys_setuid,
     setxattr::{sys_fsetxattr, sys_lsetxattr, sys_setxattr},
     shutdown::sys_shutdown,
@@ -184,6 +187,7 @@ use super::{
     waitid::sys_waitid,
     write::sys_write,
 };
+// K1 MUSE Book ---
 
 impl_syscall_nums_and_dispatch_fn! {
     SYS_READ = 0               => sys_read(args[..3]);
@@ -325,6 +329,9 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_SETRLIMIT = 160        => sys_setrlimit(args[..2]);
     SYS_CHROOT = 161           => sys_chroot(args[..1]);
     SYS_SYNC = 162             => sys_sync(args[..0]);
+    // K1 MUSE Book --- (keep wall-clock setter dispatch consistent across architectures)
+    SYS_SETTIMEOFDAY = 164     => sys_settimeofday(args[..2]);
+    // K1 MUSE Book ---
     SYS_MOUNT = 165            => sys_mount(args[..5]);
     SYS_UMOUNT2 = 166          => sys_umount(args[..2]);
     SYS_REBOOT = 169           => sys_reboot(args[..4]);
@@ -357,6 +364,9 @@ impl_syscall_nums_and_dispatch_fn! {
     SYS_TIMER_SETTIME = 223    => sys_timer_settime(args[..4]);
     SYS_TIMER_GETTIME = 224    => sys_timer_gettime(args[..2]);
     SYS_TIMER_DELETE = 226     => sys_timer_delete(args[..1]);
+    // K1 MUSE Book --- (keep wall-clock setter dispatch consistent across architectures)
+    SYS_CLOCK_SETTIME = 227    => sys_clock_settime(args[..2]);
+    // K1 MUSE Book ---
     SYS_CLOCK_GETTIME = 228    => sys_clock_gettime(args[..2]);
     SYS_CLOCK_NANOSLEEP = 230  => sys_clock_nanosleep(args[..4]);
     SYS_EXIT_GROUP = 231       => sys_exit_group(args[..1], &mut user_ctx);

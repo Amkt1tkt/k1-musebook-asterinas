@@ -2,6 +2,15 @@
 
 //! PCI bus access
 
+// K1 MUSE Book --- (public combo-PHY hooks shared by PCIe and USB)
+pub use k1::{k1_combophy_reset_deassert, k1_combophy_reset_pulse, k1_porta_phy};
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (K1 DWC RC: config via iATU, not generic ECAM)
+mod k1;
+mod k1_logic;
+// K1 MUSE Book ---
+
 use core::ops::RangeInclusive;
 
 use fdt_util::AcquireIoMems;
@@ -16,6 +25,12 @@ pub(crate) fn write32(location: &PciDeviceLocation, offset: u32, value: u32) -> 
     if offset > PCI_ECAM_MAX_OFFSET {
         return Err(Error::InvalidArgs);
     }
+    // K1 MUSE Book --- (DesignWare RC: config through the brought-up host, not flat ECAM)
+    if k1::is_active() {
+        k1::cfg_write32(location, offset, value);
+        return Ok(());
+    }
+    // K1 MUSE Book ---
     PCI_ECAM_CFG_SPACE.get().ok_or(Error::IoError)?.write_once(
         (encode_as_address_offset(location) | offset) as usize,
         &value,
@@ -26,6 +41,11 @@ pub(crate) fn read32(location: &PciDeviceLocation, offset: u32) -> Result<u32, E
     if offset > PCI_ECAM_MAX_OFFSET {
         return Err(Error::InvalidArgs);
     }
+    // K1 MUSE Book --- (DesignWare RC: config through the brought-up host, not flat ECAM)
+    if k1::is_active() {
+        return Ok(k1::cfg_read32(location, offset));
+    }
+    // K1 MUSE Book ---
     PCI_ECAM_CFG_SPACE
         .get()
         .ok_or(Error::IoError)?
@@ -52,6 +72,12 @@ fn encode_as_address_offset(location: &PciDeviceLocation) -> u32 {
 ///
 /// Returns a range for the PCI bus number, or [`None`] if there is no PCI bus.
 pub(crate) fn init() -> Option<RangeInclusive<u8>> {
+    // K1 MUSE Book --- (K1 uses a DesignWare RC; try that before generic ECAM)
+    if let Some(bus_range) = k1::init() {
+        return Some(bus_range);
+    }
+    // K1 MUSE Book ---
+
     // We follow the Linux's PCI device tree to obtain the register information
     // about the PCI bus. See also the specification at
     // <https://www.kernel.org/doc/Documentation/devicetree/bindings/pci/host-generic-pci.txt>.

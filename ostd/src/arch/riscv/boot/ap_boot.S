@@ -24,32 +24,60 @@ ap_boot_start:
     # Save hart ID in t4 for later use (t4 is caller-saved but we'll be careful).
     mv      t4, a0
 
-    # Load the page table address in Sv48 mode and set SATP.
+    # K1 MUSE Book --- (skip the Sv48 probe on Sv39-only X60 CPUs)
+    # Original upstream implementation.
+    # # Load the page table address in Sv48 mode and set SATP.
+    # lla     t0, __ap_boot_page_table_pointer - KERNEL_VMA_OFFSET
+    # ld      t1, 0(t0)                   # Load page table physical address.
+    # li      t2, SATP_MODE_SV48          # Sv48 mode.
+    # srli    t1, t1, PAGE_SHIFT - SATP_PPN_SHIFT
+    # or      t1, t1, t2
+    # csrw    satp, t1
+    #
+    # # Check if the write to satp succeeds.
+    # # Reference: <https://riscv.github.io/riscv-isa-manual/snapshot/privileged/#satp>.
+    # csrr    t3, satp
+    # beq     t3, t1, ap_flush_tlb
+    #
+    # # This AP doesn't support Sv48. So the `__ap_boot_page_table_pointer` must
+    # # point to a Sv39 page table since we assume that all harts support a same
+    # # paging mode.
+    # xor     t1, t1, t2                  # Clear previous mode bits.
+    # li      t2, SATP_MODE_SV39          # Sv39 mode.
+    # or      t1, t1, t2
+    # csrw    satp, t1
+    #
+    # # Check again if the write to satp succeeds.
+    # csrr    t0, satp
+    # beq     t0, t1, ap_flush_tlb
+    #
+    # # If the CPU doesn't support either Sv48 or Sv39 this is actually reachable.
+    # Load the page table physical page number, adding the mode below.
     lla     t0, __ap_boot_page_table_pointer - KERNEL_VMA_OFFSET
     ld      t1, 0(t0)                   # Load page table physical address.
-    li      t2, SATP_MODE_SV48          # Sv48 mode.
     srli    t1, t1, PAGE_SHIFT - SATP_PPN_SHIFT
-    or      t1, t1, t2
-    csrw    satp, t1
 
+    li      t5, {USE_SV48}
+    beqz    t5, .Lap_try_sv39
+
+    # Try loading the Sv48 page table.
+    li      t2, SATP_MODE_SV48
+    or      t2, t1, t2
+    csrw    satp, t2
     # Check if the write to satp succeeds.
     # Reference: <https://riscv.github.io/riscv-isa-manual/snapshot/privileged/#satp>.
     csrr    t3, satp
-    beq     t3, t1, ap_flush_tlb
+    beq     t3, t2, ap_flush_tlb
 
-    # This AP doesn't support Sv48. So the `__ap_boot_page_table_pointer` must
-    # point to a Sv39 page table since we assume that all harts support a same
-    # paging mode.
-    xor     t1, t1, t2                  # Clear previous mode bits.
-    li      t2, SATP_MODE_SV39          # Sv39 mode.
-    or      t1, t1, t2
-    csrw    satp, t1
-
-    # Check again if the write to satp succeeds.
-    csrr    t0, satp
-    beq     t0, t1, ap_flush_tlb
-
-    # If the CPU doesn't support either Sv48 or Sv39 this is actually reachable.
+.Lap_try_sv39:
+    # Try loading the Sv39 page table.
+    li      t2, SATP_MODE_SV39
+    or      t2, t1, t2
+    csrw    satp, t2
+    csrr    t3, satp
+    beq     t3, t2, ap_flush_tlb
+    # If neither paging mode is supported, this path is reachable.
+    # K1 MUSE Book ---
 ap_unreachable_pa:
     j       ap_unreachable_pa
 

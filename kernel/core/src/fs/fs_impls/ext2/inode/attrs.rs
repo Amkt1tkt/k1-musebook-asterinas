@@ -130,6 +130,20 @@ impl Inode {
         self.inner.read().atime()
     }
 
+    // K1 MUSE Book --- (read-only reads must not create new dirty metadata)
+    /// Records a read access only while the filesystem is currently writable.
+    pub(in ext2) fn record_access(&self) -> Result<()> {
+        if !self
+            .fs()?
+            .fs_flags()
+            .contains(crate::fs::vfs::file_system::FsFlags::RDONLY)
+        {
+            self.inner.write().set_atime(utils::now());
+        }
+        Ok(())
+    }
+    // K1 MUSE Book ---
+
     /// Sets the last access time.
     pub(in ext2) fn set_atime(&self, time: Duration) {
         self.inner.write().set_atime(time);

@@ -32,6 +32,25 @@ pub(super) struct CgroupInode {
 }
 
 impl SysTreeInodeTy for CgroupInode {
+    // K1 MUSE Book --- (register every cgroup.events inode view for population notifications)
+    // fn new_arc(
+    //     node_kind: SysTreeNodeKind,
+    //     metadata: Metadata,
+    //     mode: InodeMode,
+    //     parent: Weak<Self>,
+    // ) -> Arc<Self>
+    // where
+    //     Self: Sized,
+    // {
+    //     Arc::new_cyclic(|this| Self {
+    //         node_kind,
+    //         metadata,
+    //         extension: Extension::new(),
+    //         mode: RwLock::new(mode),
+    //         parent,
+    //         this: this.clone(),
+    //     })
+    // }
     fn new_arc(
         node_kind: SysTreeNodeKind,
         metadata: Metadata,
@@ -41,15 +60,23 @@ impl SysTreeInodeTy for CgroupInode {
     where
         Self: Sized,
     {
-        Arc::new_cyclic(|this| Self {
+        let inode = Arc::new_cyclic(|this| Self {
             node_kind,
             metadata,
             extension: Extension::new(),
             mode: RwLock::new(mode),
             parent,
             this: this.clone(),
-        })
+        });
+        if let SysTreeNodeKind::Attr(attr, node) = &inode.node_kind
+            && attr.name().as_ref() == "cgroup.events"
+        {
+            let cgroup = Arc::downcast::<CgroupNode>(node.clone()).unwrap();
+            cgroup.register_events_inode(&inode);
+        }
+        inode
     }
+    // K1 MUSE Book ---
 
     fn node_kind(&self) -> &SysTreeNodeKind {
         &self.node_kind
@@ -120,14 +147,37 @@ impl Inode for CgroupInode {
         }
     }
 
+    // K1 MUSE Book --- (preserve the permanent events inode and its existing inotify watches)
+    // fn revalidate_exists(&self, _name: &str, child: &dyn Inode) -> bool {
+    //     // Attribute nodes in the cache should not be trusted because they
+    //     // may be dynamically created or removed based on the state of the
+    //     // cgroup controller.
+    //     child
+    //         .downcast_ref::<Self>()
+    //         .is_some_and(|child| !matches!(child.node_kind(), SysTreeNodeKind::Attr(..)))
+    // }
     fn revalidate_exists(&self, _name: &str, child: &dyn Inode) -> bool {
-        // Attribute nodes in the cache should not be trusted because they
-        // may be dynamically created or removed based on the state of the
-        // cgroup controller.
-        child
-            .downcast_ref::<Self>()
-            .is_some_and(|child| !matches!(child.node_kind(), SysTreeNodeKind::Attr(..)))
+        let Some(child) = child.downcast_ref::<Self>() else {
+            return false;
+        };
+        match child.node_kind() {
+            // Unlike controller attributes, cgroup.events is permanent. Replacing
+            // its inode on every open discards the publisher behind inotify watches.
+            SysTreeNodeKind::Attr(attr, node) if attr.name().as_ref() == "cgroup.events" => {
+                let SysTreeNodeKind::Branch(parent) = self.node_kind() else {
+                    return false;
+                };
+                if parent.id() != node.id() {
+                    return false;
+                }
+                Arc::downcast::<CgroupNode>(node.clone()).is_ok_and(|node| node.is_alive())
+            }
+            // Preserve revalidation for dynamically enabled controller attributes.
+            SysTreeNodeKind::Attr(..) => false,
+            _ => true,
+        }
     }
+    // K1 MUSE Book ---
 
     fn revalidate_absent(&self, _name: &str) -> bool {
         false

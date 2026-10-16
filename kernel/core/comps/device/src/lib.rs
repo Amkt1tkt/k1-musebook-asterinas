@@ -32,6 +32,9 @@ macro_rules! __log_prefix {
     };
 }
 
+// K1 MUSE Book --- (legacy sysfs subtrees share the device-model roots)
+pub mod auxiliary;
+// K1 MUSE Book ---
 pub mod bus;
 pub mod class;
 pub mod common;

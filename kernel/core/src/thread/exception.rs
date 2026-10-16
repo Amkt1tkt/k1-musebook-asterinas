@@ -6,12 +6,15 @@ use ostd::arch::cpu::context::CpuException;
 use ostd::arch::cpu::context::CpuExceptionInfo as CpuException;
 use ostd::{arch::cpu::context::UserContext, task::Task};
 
+// K1 MUSE Book --- (refused GEM pages are SIGBUS)
+use crate::vm::vmar::{PageFaultFailure, PageFaultSignal};
 use crate::{
     prelude::*,
     process::signal::signals::fault::FaultSignal,
     thread::kernel_thread::AsKernelThread,
     vm::vmar::{PageFaultInfo, Vmar},
 };
+// K1 MUSE Book ---
 
 pub(super) fn handle_exception(ctx: &Context, user_ctx: &UserContext, exception: CpuException) {
     debug!("handle exception: {:#x?}", exception);
@@ -19,9 +22,21 @@ pub(super) fn handle_exception(ctx: &Context, user_ctx: &UserContext, exception:
     if let Ok(page_fault_info) = PageFaultInfo::try_from(&exception) {
         let user_space = ctx.user_space();
         let vmar = user_space.vmar();
-        if handle_page_fault_from_vmar(vmar, &page_fault_info).is_ok() {
-            return;
+        // K1 MUSE Book --- (refused GEM pages are SIGBUS, not the exception's SIGSEGV)
+        // if handle_page_fault_from_vmar(vmar, &page_fault_info).is_ok() {
+        //     return;
+        // }
+        match handle_page_fault_from_vmar(vmar, &page_fault_info) {
+            Ok(()) => return,
+            Err(failure) => {
+                if let Some(signal) = page_fault_signal(failure.signal(), page_fault_info.address())
+                {
+                    ctx.posix_thread.enqueue_signal(Box::new(signal));
+                    return;
+                }
+            }
         }
+        // K1 MUSE Book ---
     }
 
     // We cannot handle most exceptions. Send a fault signal to the current thread before returning
@@ -30,16 +45,41 @@ pub(super) fn handle_exception(ctx: &Context, user_ctx: &UserContext, exception:
 }
 
 /// Handles the page fault occurs in the VMAR.
-fn handle_page_fault_from_vmar(vmar: &Vmar, page_fault_info: &PageFaultInfo) -> Result<(), ()> {
+// K1 MUSE Book --- (propagate the signal verdict so GEM refusals become SIGBUS)
+// fn handle_page_fault_from_vmar(vmar: &Vmar, page_fault_info: &PageFaultInfo) -> Result<(), ()> {
+//     if let Err(e) = vmar.handle_page_fault(page_fault_info) {
+//         warn!(
+//             "page fault handler failed: info: {:#x?}, err: {:?}",
+//             page_fault_info, e
+//         );
+//         return Err(());
+//     }
+//     Ok(())
+// }
+fn handle_page_fault_from_vmar(
+    vmar: &Vmar,
+    page_fault_info: &PageFaultInfo,
+) -> core::result::Result<(), PageFaultFailure> {
     if let Err(e) = vmar.handle_page_fault(page_fault_info) {
         warn!(
             "page fault handler failed: info: {:#x?}, err: {:?}",
             page_fault_info, e
         );
-        return Err(());
+        return Err(e);
     }
     Ok(())
 }
+
+/// Converts the verdict of the page fault path into a signal.
+fn page_fault_signal(verdict: PageFaultSignal, address: Vaddr) -> Option<FaultSignal> {
+    use crate::process::signal::constants::{BUS_ADRERR, SIGBUS};
+
+    match verdict {
+        PageFaultSignal::FromException => None,
+        PageFaultSignal::Bus => Some(FaultSignal::new(SIGBUS, BUS_ADRERR, Some(address as u64))),
+    }
+}
+// K1 MUSE Book ---
 
 /// A trait that converts CPU exceptions into fault signals.
 ///
@@ -80,12 +120,64 @@ pub(super) fn page_fault_handler(info: &CpuException) -> Result<(), ()> {
         }
 
         let user_space = CurrentUserSpace::new(thread_local);
-        handle_page_fault_from_vmar(user_space.vmar(), &page_fault_info)
+        // K1 MUSE Book --- (in-kernel EFAULT path does not deliver a signal)
+        // handle_page_fault_from_vmar(user_space.vmar(), &page_fault_info)
+        handle_page_fault_from_vmar(user_space.vmar(), &page_fault_info).map_err(|_| ())
+        // K1 MUSE Book ---
     } else {
         let vmar = task
             .as_kernel_thread()
             .and_then(|kernel_thread| kernel_thread.vmar())
             .ok_or(())?;
-        handle_page_fault_from_vmar(vmar, &page_fault_info)
+        // K1 MUSE Book --- (in-kernel EFAULT path does not deliver a signal)
+        // handle_page_fault_from_vmar(vmar, &page_fault_info)
+        handle_page_fault_from_vmar(vmar, &page_fault_info).map_err(|_| ())
+        // K1 MUSE Book ---
     }
 }
+
+// K1 MUSE Book --- (SIGBUS conversion for a refused device page)
+#[cfg(ktest)]
+mod test {
+    use ostd::prelude::ktest;
+
+    use super::*;
+    use crate::{
+        process::signal::constants::{BUS_ADRERR, SIGBUS},
+        vm::vmar::on_demand::DeviceFaultError,
+    };
+
+    const FAULT_ADDR: Vaddr = 0x1_0000_0123;
+
+    #[ktest]
+    fn a_refused_device_page_is_a_sigbus() {
+        let expected = FaultSignal::new(SIGBUS, BUS_ADRERR, Some(FAULT_ADDR as u64));
+
+        for error in [DeviceFaultError::OutOfBounds, DeviceFaultError::OutOfMemory] {
+            let failure = PageFaultFailure::from(error);
+
+            assert_eq!(failure.signal(), PageFaultSignal::Bus);
+            assert_eq!(
+                page_fault_signal(failure.signal(), FAULT_ADDR),
+                Some(expected),
+                "{:?} must be reported as SIGBUS",
+                error
+            );
+            assert_eq!(failure.error().error(), error.errno());
+        }
+
+        assert_ne!(
+            DeviceFaultError::OutOfBounds.errno(),
+            DeviceFaultError::OutOfMemory.errno()
+        );
+    }
+
+    #[ktest]
+    fn other_failures_leave_the_signal_to_the_exception() {
+        let failure = PageFaultFailure::from(Error::new(Errno::EACCES));
+
+        assert_eq!(failure.signal(), PageFaultSignal::FromException);
+        assert_eq!(page_fault_signal(failure.signal(), FAULT_ADDR), None);
+    }
+}
+// K1 MUSE Book ---

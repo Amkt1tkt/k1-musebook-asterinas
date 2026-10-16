@@ -39,6 +39,10 @@ impl NetlinkSocketTable {
 pub(crate) trait SupportedNetlinkProtocol {
     type Message: 'static + Send;
 
+    // K1 MUSE Book --- (only libudev's uevent monitor accepts filter stubs)
+    const ACCEPTS_UNEVALUATED_FILTER: bool = false;
+    // K1 MUSE Book ---
+
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>>;
 
     fn bind(
@@ -81,6 +85,10 @@ pub(crate) enum NetlinkUeventProtocol {}
 
 impl SupportedNetlinkProtocol for NetlinkUeventProtocol {
     type Message = UeventMessage;
+
+    // K1 MUSE Book --- (uevents are not emitted; libudev also filters in user space)
+    const ACCEPTS_UNEVALUATED_FILTER: bool = true;
+    // K1 MUSE Book ---
 
     fn socket_table() -> &'static RwMutex<ProtocolSocketTable<Self::Message>> {
         &NETLINK_SOCKET_TABLE.get().unwrap().uevent

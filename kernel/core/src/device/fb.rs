@@ -5,8 +5,11 @@ use aster_framebuffer::{
     pixel::PixelFormat,
 };
 use device_id::{DeviceId, MajorId, MinorId};
-use ostd::mm::{HasPaddr, HasSize, VmIo};
+// K1 MUSE Book --- (size/paddr now on FrameBuffer; VmIo still needed for userspace copy)
+// use ostd::mm::{HasPaddr, HasSize, VmIo};
+use ostd::mm::{HasSize, VmIo};
 
+// K1 MUSE Book ---
 use super::{Device, DeviceType, registry::char};
 use crate::{
     context::current_userspace,
@@ -310,12 +313,20 @@ impl FbHandle {
 
     /// Collects the information in the [`FbFixScreenInfo`].
     fn collect_fix_screen_info(&self) -> FbFixScreenInfo {
+        // K1 MUSE Book --- (paddr/size work for both IoMem and DMA scanout)
+        // FbFixScreenInfo {
+        //     smem_start: self.framebuffer.io_mem().paddr() as u64,
+        //     smem_len: self.framebuffer.io_mem().size() as u32,
+        //     line_length: self.framebuffer.line_size() as u32,
+        //     ..Default::default()
+        // }
         FbFixScreenInfo {
-            smem_start: self.framebuffer.io_mem().paddr() as u64,
-            smem_len: self.framebuffer.io_mem().size() as u32,
+            smem_start: self.framebuffer.paddr() as u64,
+            smem_len: self.framebuffer.size() as u32,
             line_length: self.framebuffer.line_size() as u32,
             ..Default::default()
         }
+        // K1 MUSE Book ---
     }
 
     /// Handles the [`ioctl_defs::GetColorMap`] ioctl command.
@@ -421,8 +432,11 @@ impl FileOps for FbHandle {
             return Ok(0);
         }
 
-        let io_mem = self.framebuffer.io_mem();
-        let size = io_mem.size();
+        // K1 MUSE Book --- (size() covers DMA-backed scanout; io_mem() is now Option)
+        // let io_mem = self.framebuffer.io_mem();
+        // let size = io_mem.size();
+        let size = self.framebuffer.size();
+        // K1 MUSE Book ---
         if offset >= size {
             return Ok(0);
         }
@@ -435,7 +449,10 @@ impl FileOps for FbHandle {
         let mut new_writer = writer.clone_exclusive();
         new_writer.limit(len);
 
-        let result = io_mem.read_fallible(offset, &mut new_writer);
+        // K1 MUSE Book --- (fallible read through FrameBuffer, not IoMem)
+        // let result = io_mem.read_fallible(offset, &mut new_writer);
+        let result = self.framebuffer.read_fallible(offset, &mut new_writer);
+        // K1 MUSE Book ---
         let copied = match result {
             Ok(copied) => copied,
             Err((err, copied)) => {
@@ -461,8 +478,11 @@ impl FileOps for FbHandle {
             return Ok(0);
         }
 
-        let io_mem = self.framebuffer.io_mem();
-        let size = io_mem.size();
+        // K1 MUSE Book --- (size() covers DMA-backed scanout; io_mem() is now Option)
+        // let io_mem = self.framebuffer.io_mem();
+        // let size = io_mem.size();
+        let size = self.framebuffer.size();
+        // K1 MUSE Book ---
         if offset >= size {
             return_errno_with_message!(
                 Errno::ENOSPC,
@@ -478,7 +498,10 @@ impl FileOps for FbHandle {
         let mut new_reader = reader.clone();
         new_reader.limit(len);
 
-        let result = io_mem.write_fallible(offset, &mut new_reader);
+        // K1 MUSE Book --- (fallible write through FrameBuffer, not IoMem)
+        // let result = io_mem.write_fallible(offset, &mut new_reader);
+        let result = self.framebuffer.write_fallible(offset, &mut new_reader);
+        // K1 MUSE Book ---
         let copied = match result {
             Ok(copied) => copied,
             Err((err, copied)) => {
@@ -556,8 +579,16 @@ impl PerOpenFileOps for FbHandle {
 
 impl Mappable for FbHandle {
     fn map(&self, offset: usize, mut handle: MapHandle) -> Result<Box<dyn MappedObject>> {
-        let io_mem = self.framebuffer.io_mem();
-        let mapped_handle = Box::new(FbMapHandle);
+        // K1 MUSE Book --- (DMA scanout requires both a WC alias and its owner)
+        // let io_mem = self.framebuffer.io_mem();
+        // let mapped_handle = Box::new(FbMapHandle);
+        let io_mem = self.framebuffer.io_mem().ok_or_else(|| {
+            Error::with_message(Errno::ENODEV, "this framebuffer does not support mmap")
+        })?;
+        let mapped_handle = Box::new(FbMapHandle {
+            framebuffer: self.framebuffer.clone(),
+        });
+        // K1 MUSE Book ---
 
         let io_mem_sliced = if offset >= io_mem.size() {
             return Ok(mapped_handle);
@@ -573,14 +604,27 @@ impl Mappable for FbHandle {
     }
 }
 
+// K1 MUSE Book --- (retain framebuffer DMA ownership across fork and VMA splitting)
+// #[derive(Debug)]
+// struct FbMapHandle;
+// impl MappedObject for FbMapHandle {
+//     fn dup_at_offset(&self, _offset: usize) -> Box<dyn MappedObject> {
+//         Box::new(Self)
+//     }
+// }
 #[derive(Debug)]
-struct FbMapHandle;
+struct FbMapHandle {
+    framebuffer: Arc<FrameBuffer>,
+}
 
 impl MappedObject for FbMapHandle {
     fn dup_at_offset(&self, _offset: usize) -> Box<dyn MappedObject> {
-        Box::new(Self)
+        Box::new(Self {
+            framebuffer: self.framebuffer.clone(),
+        })
     }
 }
+// K1 MUSE Book ---
 
 pub(super) fn init_in_first_kthread() {
     if FRAMEBUFFER.get().is_none() {

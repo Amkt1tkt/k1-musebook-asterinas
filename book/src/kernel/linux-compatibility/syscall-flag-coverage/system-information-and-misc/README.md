@@ -105,6 +105,25 @@ Unsupported predefined clock IDs:
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/clock_gettime.2.html).
 
+<!-- K1 MUSE Book --- (document the realtime setter and its authority/range contract) -->
+### `clock_settime`
+
+Supported functionality in SCML:
+
+```c
+{{#include clock_settime.scml}}
+```
+
+Only `CLOCK_REALTIME` can be set.
+The caller needs `CAP_SYS_TIME` in the initial user namespace.
+Seconds must be nonnegative and nanoseconds must lie in `[0, 1000000000)`.
+Values outside the kernel's bounded realtime range,
+or earlier than the current `CLOCK_MONOTONIC`, are rejected.
+Successful calls update realtime and its coarse/vDSO representations;
+monotonic time and the boot-time sample remain unchanged.
+The call does not write the RTC; persistence uses `RTC_SET_TIME` or the userspace hwclock service.
+<!-- K1 MUSE Book --- -->
+
 ### `clock_nanosleep`
 
 Supported functionality in SCML:
@@ -118,3 +137,26 @@ Unsupported clock IDs:
 
 For more information,
 see [the man page](https://man7.org/linux/man-pages/man2/clock_nanosleep.2.html).
+
+<!-- K1 MUSE Book --- (document legacy UTC RTC initialization without a local-time warp) -->
+### `settimeofday`
+
+Supported functionality in SCML:
+
+```c
+{{#include settimeofday.scml}}
+```
+
+The caller needs `CAP_SYS_TIME` in the initial user namespace,
+including for a timezone-only call.
+Either pointer may be `NULL`; a supplied `tv` needs nonnegative seconds
+and microseconds in `[0, 1000000)`.
+The realtime range and RTC persistence limits are the same as for `clock_settime`.
+
+A supplied `tz` updates shared timezone metadata;
+`tz_minuteswest` must lie in `[-900, 900]`.
+The boot RTC is interpreted as UTC, and Linux's first-call local-RTC clock warp is unsupported.
+A first timezone-only call with a nonzero offset returns `EOPNOTSUPP`.
+A zero-offset initialization or a call supplying both `tv` and `tz` avoids that warp;
+subsequent timezone metadata updates do not move realtime.
+<!-- K1 MUSE Book --- -->

@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: native regression fixture for the pinned battery subscription.
+[package]
+name = "k1-upower-subscription-tests"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+cosmic-settings-subscriptions = { git = "https://github.com/pop-os/cosmic-settings-subscriptions", default-features = false, features = ["upower"] }
+futures = "=0.3.31"
+iced_futures = { git = "https://github.com/pop-os/libcosmic" }
+tokio = { version = "=1.44.1", features = ["macros", "rt-multi-thread", "time"] }
+zbus = "=4.4.0"

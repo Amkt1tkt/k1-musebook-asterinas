@@ -76,6 +76,10 @@ mod device_info;
 
 extern crate alloc;
 
+// K1 MUSE Book --- (USB3 ComboPHY shares PortA PUPHY / APMU reset with the RC)
+#[cfg(target_arch = "riscv64")]
+pub use arch::{k1_combophy_reset_deassert, k1_combophy_reset_pulse, k1_porta_phy};
+// K1 MUSE Book ---
 use component::{ComponentInitError, init_component};
 pub use device_info::{PciDeviceId, PciDeviceLocation};
 use ostd::sync::Mutex;

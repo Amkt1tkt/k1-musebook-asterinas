@@ -52,6 +52,67 @@ fn assert_allocation_well_formed(layout: Layout) {
     instance.add_free_memory(allocated, layout.size());
 }
 
+// K1 MUSE Book --- (DMA/normal zone policy)
+#[ktest]
+fn split_at_dma_limit_partitions_a_range() {
+    use crate::pools::split_at_dma_limit;
+
+    let limit = 16 * PAGE_SIZE;
+    assert_eq!(split_at_dma_limit(0, 0, limit), (None, None));
+    assert_eq!(
+        split_at_dma_limit(0, 8 * PAGE_SIZE, limit),
+        (Some((0, 8 * PAGE_SIZE)), None)
+    );
+    assert_eq!(
+        split_at_dma_limit(limit, 8 * PAGE_SIZE, limit),
+        (None, Some((limit, 8 * PAGE_SIZE)))
+    );
+    assert_eq!(
+        split_at_dma_limit(8 * PAGE_SIZE, 16 * PAGE_SIZE, limit),
+        (
+            Some((8 * PAGE_SIZE, 8 * PAGE_SIZE)),
+            Some((limit, 8 * PAGE_SIZE))
+        )
+    );
+}
+
+#[ktest]
+fn alloc_below_never_returns_address_at_or_above_limit() {
+    let limit = ostd::mm::dma_addr_limit();
+    let instance = FrameAllocator;
+    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
+
+    let mut addrs = alloc::vec::Vec::new();
+    for _ in 0..8 {
+        let Some(paddr) = instance.alloc_below(layout, limit) else {
+            break;
+        };
+        assert!(
+            paddr < limit,
+            "alloc_below returned {:#x} >= limit {:#x}",
+            paddr,
+            limit
+        );
+        assert!(
+            paddr.saturating_add(layout.size()) <= limit,
+            "alloc_below range {:#x}..{:#x} crosses limit {:#x}",
+            paddr,
+            paddr + layout.size(),
+            limit
+        );
+        addrs.push(paddr);
+    }
+    assert!(
+        !addrs.is_empty(),
+        "alloc_below must succeed at least once: every platform this kernel \
+         boots has some memory below the DMA limit"
+    );
+    for paddr in addrs {
+        instance.add_free_memory(paddr, PAGE_SIZE);
+    }
+}
+// K1 MUSE Book ---
+
 /// A mocked memory region for testing.
 ///
 /// All the frames in the returned memory region will be marked as used.

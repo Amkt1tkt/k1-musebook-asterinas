@@ -29,11 +29,32 @@ let
   resolv_conf = pkgs.callPackage ./resolv_conf.nix { dnsServer = dnsServer; };
   # Whether the initramfs should include evtest, a common tool to debug input devices (`/dev/input/eventX`)
   is_evtest_included = false;
+  # K1 MUSE Book --- (e2fsck so init can fsck= the ext2 root before mount)
+  # Keep bitmap reads serial to avoid concurrent filesystem-checker workers.
+  e2fsprogsBin = pkgs.callPackage ./e2fsck-k1.nix { };
+  # K1 MUSE Book ---
+
+  # K1 MUSE Book --- (PowerVR firmware must be in the initramfs; the driver
+  #   loads it from the first kthread before switch_root.)
+  firmwarePath = ./../src/firmware;
+  includeFirmware = builtins.pathExists firmwarePath;
+  firmware =
+    if includeFirmware then
+      builtins.path {
+        path = firmwarePath;
+        name = "firmware";
+      }
+    else
+      null;
+  # K1 MUSE Book ---
 
   all_pkgs = [
     busybox
     etc
     resolv_conf
+    # K1 MUSE Book --- (include e2fsck in the initramfs closure)
+    e2fsprogsBin
+    # K1 MUSE Book ---
   ]
   ++ lib.optionals (benchmark != null) [ benchmark.package ]
   ++ lib.optionals (conformance != null) [ conformance.package ]
@@ -51,9 +72,19 @@ stdenvNoCC.mkDerivation {
     ln -sfn usr/lib $out/lib
     ln -sfn usr/lib64 $out/lib64
     cp -r ${busybox}/bin/* $out/bin/
+    # K1 MUSE Book --- (install e2fsck next to busybox)
+    cp ${e2fsprogsBin}/bin/e2fsck $out/bin/e2fsck
+    # K1 MUSE Book ---
     ${lib.optionalString is_evtest_included ''
       cp -r ${pkgs.evtest}/bin/* $out/bin/
     ''}
+    # K1 MUSE Book --- (early-loaded PowerVR firmware for /lib/firmware)
+    ${lib.optionalString includeFirmware ''
+      mkdir -p $out/usr/lib/firmware
+      cp -r ${firmware}/* $out/usr/lib/firmware/
+      chmod -R a+r $out/usr/lib/firmware
+    ''}
+    # K1 MUSE Book ---
 
     cp ${boot_hello} $out/test/boot_hello.sh
     cp ${init} $out/init

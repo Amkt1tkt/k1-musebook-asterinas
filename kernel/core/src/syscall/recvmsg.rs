@@ -10,6 +10,8 @@ use crate::{
     util::net::CUserMsgHdr,
 };
 
+// K1 MUSE Book --- (pass receive flags through ancillary-data delivery)
+//         c_user_msghdr.write_control_messages_to_user(control_messages, &user_space)?;
 pub(super) fn sys_recvmsg(
     sockfd: RawFileDesc,
     user_msghdr_ptr: Vaddr,
@@ -49,7 +51,7 @@ pub(super) fn sys_recvmsg(
 
     let control_messages = message_header.control_messages();
     let (control_len, control_flags) =
-        c_user_msghdr.write_control_messages_to_user(control_messages, &user_space)?;
+        c_user_msghdr.write_control_messages_to_user(control_messages, flags, &user_space)?;
     c_user_msghdr.msg_controllen = control_len as _;
     c_user_msghdr.msg_flags = (output.flags() | control_flags).bits().cast_unsigned();
 
@@ -57,3 +59,4 @@ pub(super) fn sys_recvmsg(
 
     Ok(SyscallReturn::Return(output.len() as _))
 }
+// K1 MUSE Book ---

@@ -65,7 +65,10 @@ mod early;
 pub mod parse;
 pub mod types;
 mod unimplemented;
-
+// K1 MUSE Book --- (k1.diag= gate used by other crates)
+pub mod diag;
+pub use diag::diag_enabled;
+// K1 MUSE Book ---
 pub use dispatch::INIT_PROC_ARGS;
 #[doc(hidden)]
 pub use dispatch::KernelParam;

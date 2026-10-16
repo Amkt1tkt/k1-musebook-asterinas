@@ -114,6 +114,59 @@ pub(crate) fn can_sync_dma() -> bool {
     has_extensions(IsaExtensions::ZICBOM)
 }
 
+// K1 MUSE Book --- (Svpbmt query, 32-bit DMA split, deferred I-cache flush)
+/// Whether a non-cacheable DRAM mapping can override its physical memory
+/// attributes through Svpbmt. Without this extension, ordinary RAM retains
+/// its write-back PMA; MMIO still follows its I/O PMA.
+pub(crate) fn can_map_uncacheable() -> bool {
+    has_extensions(IsaExtensions::SVPBMT)
+}
+
+/// Exclusive upper bound on physical addresses that 32-bit DMA masters
+/// on this platform can program.
+///
+/// The K1 low DRAM bank is 2 GiB; high DRAM starts at `0x1_0000_0000`.
+/// A 32-bit master cannot reach the high bank.
+pub(crate) fn dma_addr_limit() -> Paddr {
+    0x1_0000_0000
+}
+
+static ICACHE_FLUSH_GEN: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+crate::cpu_local_cell! {
+    /// The `ICACHE_FLUSH_GEN` value this hart last flushed its I-cache at.
+    static LOCAL_ICACHE_GEN: usize = 0;
+}
+
+/// Records that a user-executable page has been (re)mapped, requiring every hart
+/// to flush its instruction cache before it next enters user mode.
+pub(crate) fn mark_user_icache_stale() {
+    ICACHE_FLUSH_GEN.fetch_add(1, core::sync::atomic::Ordering::Release);
+}
+
+/// Flushes the local instruction cache if a user-executable page was mapped
+/// since this hart last flushed. The guard pins the hart through the generation
+/// check, fence, and local bookkeeping; it must remain held until user entry.
+pub(crate) fn sync_local_icache_for_user(_guard: &crate::irq::DisabledLocalIrqGuard) {
+    let cur_gen = ICACHE_FLUSH_GEN.load(core::sync::atomic::Ordering::Acquire);
+    if LOCAL_ICACHE_GEN.load() != cur_gen {
+        // SAFETY: `fence.i` only synchronizes this hart's instruction fetches
+        // with prior data writes; it has no memory-safety impact.
+        unsafe { core::arch::asm!("fence.i", options(nostack, preserves_flags)) };
+        LOCAL_ICACHE_GEN.store(cur_gen);
+    }
+}
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (order normal memory and device MMIO at DMA publication)
+// RISC-V separates device I/O from the R/W domain used by atomic fences.
+pub(crate) fn dma_io_fence() {
+    // SAFETY: This baseline architecture barrier neither accesses memory nor
+    // changes register ownership. Omitting `nomem` also orders compiler accesses.
+    unsafe { core::arch::asm!("fence iorw, iorw", options(nostack, preserves_flags)) };
+}
+// K1 MUSE Book ---
+
 /// # Safety
 ///
 /// The caller must ensure that
@@ -159,6 +212,12 @@ pub(crate) unsafe fn sync_dma_range(mut range: Range<Vaddr>, is_from_device: boo
             }
         }
     }
+
+    // K1 MUSE Book --- (cache operations must also precede device MMIO)
+    // CMOs are W or O according to their physical memory attributes. Include
+    // the I/O domain so maintenance completes before the doorbell accesses.
+    dma_io_fence();
+    // K1 MUSE Book ---
 }
 
 /// Activates the given root-level page table.
@@ -231,6 +290,10 @@ impl PageTableEntry {
 
         let cache = if self.0 & PteFlags::PBMT_IO.bits() != 0 {
             CachePolicy::Uncacheable
+        // K1 MUSE Book --- (Svpbmt PBMT_NC is write-combining / non-cacheable memory)
+        } else if self.0 & PteFlags::PBMT_NC.bits() != 0 {
+            CachePolicy::WriteCombining
+        // K1 MUSE Book ---
         } else {
             CachePolicy::Writeback
         };
@@ -254,8 +317,12 @@ impl PageTableEntry {
             | parse_flags!(prop.flags.bits(), PageFlags::R, PteFlags::READABLE)
             | parse_flags!(prop.flags.bits(), PageFlags::W, PteFlags::WRITABLE)
             | parse_flags!(prop.flags.bits(), PageFlags::X, PteFlags::EXECUTABLE)
-            | parse_flags!(prop.flags.bits(), PageFlags::ACCESSED, PteFlags::ACCESSED)
-            | parse_flags!(prop.flags.bits(), PageFlags::DIRTY, PteFlags::DIRTY)
+            // K1 MUSE Book --- (X60 has no Svadu: leaf PTEs must preset A|D or the access faults)
+            // | parse_flags!(prop.flags.bits(), PageFlags::ACCESSED, PteFlags::ACCESSED)
+            // | parse_flags!(prop.flags.bits(), PageFlags::DIRTY, PteFlags::DIRTY)
+            | PteFlags::ACCESSED.bits()
+            | PteFlags::DIRTY.bits()
+            // K1 MUSE Book ---
             | parse_flags!(prop.priv_flags.bits(), PrivFlags::USER, PteFlags::USER)
             | parse_flags!(prop.priv_flags.bits(), PrivFlags::GLOBAL, PteFlags::GLOBAL)
             | parse_flags!(prop.priv_flags.bits(), PrivFlags::AVAIL1, PteFlags::RSV1)
@@ -270,14 +337,22 @@ impl PageTableEntry {
 
         match prop.cache {
             CachePolicy::Writeback => (),
+            // K1 MUSE Book --- (PBMT_IO for MMIO; PBMT_NC for non-coherent DMA / scanout)
             CachePolicy::Uncacheable => {
-                // TODO: Currently Asterinas uses `Uncacheable` only for I/O
-                // memory. Normal memory can also be `Noncacheable`, where the
-                // PBMT should be set to `PBMT_NC`.
+                // Strongly-ordered non-cacheable I/O (device MMIO).
+                // Normal DMA memory uses PBMT_NC below.
                 if has_extensions(IsaExtensions::SVPBMT) {
                     flags |= PteFlags::PBMT_IO.bits()
                 }
             }
+            CachePolicy::WriteCombining => {
+                // Weakly-ordered non-cacheable main memory (non-coherent DMA,
+                // framebuffers, PowerVR buffers).
+                if has_extensions(IsaExtensions::SVPBMT) {
+                    flags |= PteFlags::PBMT_NC.bits()
+                }
+            }
+            // K1 MUSE Book ---
             _ => panic!("unsupported cache policy"),
         }
 

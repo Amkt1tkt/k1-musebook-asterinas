@@ -37,6 +37,9 @@ use aster_util::printer::VmPrinterError;
 use component::{ComponentInitError, init_component};
 use spin::Once;
 
+// K1 MUSE Book --- (device-model directories and symlinks)
+pub use self::utils::{DirNode, SymlinkNode};
+// K1 MUSE Book ---
 pub use self::{
     attr::{SysAttr, SysAttrSet, SysAttrSetBuilder},
     node::{

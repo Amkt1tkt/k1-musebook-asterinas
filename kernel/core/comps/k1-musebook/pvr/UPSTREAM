@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: pinned Linux source and firmware provenance.
+# The upstream revision this port tracks.
+#
+# Machine-readable; `pvr-regen` and CI both parse it. See CONVENTIONS.md.
+
+repo    https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+commit  fc02acf6ac0ccde0c805c2daa9148683cdd01ba8
+date    2026-07-28
+
+# Paths in scope. Everything ported lives under one of these.
+path    drivers/gpu/drm/imagination
+path    include/uapi/drm/pvr_drm.h
+
+# Deliberately out of scope. BXE-2-32 has a MIPS firmware processor, confirmed by
+# the MIPS_* section IDs in rogue_36.29.52.182_v1.fw's layout table, so the META
+# and RISC-V firmware paths are unreachable. Do not port these without first
+# updating this file and saying why.
+exclude drivers/gpu/drm/imagination/pvr_fw_meta.c
+exclude drivers/gpu/drm/imagination/pvr_fw_meta.h
+exclude drivers/gpu/drm/imagination/pvr_rogue_meta.h
+exclude drivers/gpu/drm/imagination/pvr_fw_riscv.c
+exclude drivers/gpu/drm/imagination/pvr_rogue_riscv.h
+exclude drivers/gpu/drm/imagination/pvr_debugfs.c
+exclude drivers/gpu/drm/imagination/pvr_debugfs.h
+
+# The root filesystem and stage-1 initramfs use the same pinned, unmodified
+# firmware image. Stage 1 embeds it under test/initramfs/src/firmware/powervr/.
+firmware  powervr/rogue_36.29.52.182_v1.fw
+fw-repo   https://gitlab.freedesktop.org/imagination/linux-firmware.git
+fw-branch powervr
+fw-license LICENSE.powervr  (binary redistribution permitted)
+#
+# Verified offline by parsing the info header 4 KiB from the end of the image:
+#
+#   info_version      3             (the driver accepts only 3)
+#   bvnc              36.29.52.182  (matches BXE-2-32)
+#   flags             0x1           PVR_FW_FLAGS_OPEN_SOURCE protocol flag set
+# The flag does not grant firmware source rights; use LICENSE.powervr.
+#   fw_version        v1.1 build 6976702
+#   device_info_size  4096
+#   layout            MIPS_CODE, MIPS_EXCEPTIONS_CODE, MIPS_BOOT_CODE,
+#                     MIPS_PRIVATE_DATA, MIPS_BOOT_DATA, MIPS_STACK

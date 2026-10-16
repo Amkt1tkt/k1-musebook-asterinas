@@ -2,6 +2,10 @@
 
 //! The console I/O.
 
+// K1 MUSE Book --- (share serial formatting with the reentrant console path)
+use core::fmt;
+
+// K1 MUSE Book ---
 use spin::Once;
 
 use crate::{
@@ -68,6 +72,15 @@ pub(crate) fn init(early_cmdline: &EarlyCmdline) {
     serial.init();
     SERIAL_PORT.call_once(move || SpinLock::new(serial));
 }
+
+// K1 MUSE Book --- (no second UART mapping; drop a nested write rather than spin)
+/// Writes without taking [`SERIAL_PORT`].
+///
+/// LoongArch's UART lives inside the lock and this module has no second
+/// mapping. A nested print on this CPU therefore drops the inner write
+/// rather than spinning.
+pub(crate) fn write_fmt_raw(_args: fmt::Arguments) {}
+// K1 MUSE Book ---
 
 fn lookup_uart_base_address() -> Option<usize> {
     let device_tree = DEVICE_TREE.get().unwrap();

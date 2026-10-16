@@ -47,7 +47,10 @@ pub(crate) fn unregister_subsystem(name: &str) -> Result<()> {
 
 #[cfg(ktest)]
 pub(crate) fn init_for_ktest() {
-    aster_systree::init_for_ktest();
+    // K1 MUSE Book --- (sysfs initialization also registers device-model subtrees)
+    // aster_systree::init_for_ktest();
+    aster_device::init_for_ktest();
+    // K1 MUSE Book ---
     crate::fs::vfs::init();
     super::sysfs::init();
     init();

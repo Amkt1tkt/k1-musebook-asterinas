@@ -15,3 +15,8 @@ set -e
 ./mmap/mmap_vmrss
 ./mmap/rev_map_ext2
 ./mmap/rev_map_tmpfs
+
+# K1 MUSE Book --- (demand-paged GEM mmap; drm_dumb_hold keeps the BO alive)
+# The only demand-paged device mapping in the tree is a DRM buffer object.
+../device/drm/drm_dumb_hold ./mmap_device/mmap_on_demand_device
+# K1 MUSE Book ---

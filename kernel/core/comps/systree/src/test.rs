@@ -10,11 +10,18 @@ use ostd::{
     prelude::ktest,
 };
 
+// K1 MUSE Book --- (DirNode used by the get_or_create_dir ktest below)
+// use super::{
+//     BranchNodeFields, Error, Result, SymlinkNodeFields, SysAttrSetBuilder, SysBranchNode, SysNode,
+//     SysNodeType, SysObj, SysPerms, SysStr, SysSymlink, SysTree, inherit_sys_branch_node,
+//     inherit_sys_symlink_node,
+// };
 use super::{
-    BranchNodeFields, Error, Result, SymlinkNodeFields, SysAttrSetBuilder, SysBranchNode, SysNode,
-    SysNodeType, SysObj, SysPerms, SysStr, SysSymlink, SysTree, inherit_sys_branch_node,
+    BranchNodeFields, DirNode, Error, Result, SymlinkNodeFields, SysAttrSetBuilder, SysBranchNode,
+    SysNode, SysNodeType, SysObj, SysPerms, SysStr, SysSymlink, SysTree, inherit_sys_branch_node,
     inherit_sys_symlink_node,
 };
+// K1 MUSE Book ---
 
 #[ktest]
 fn relative_symlink_targets_preserve_the_target_name() {
@@ -233,6 +240,43 @@ fn symlinks() {
     let symlink_node = symlink_obj.cast_to_symlink().unwrap();
     assert_eq!(symlink_node.target_path(), "/sys/devices/device");
 }
+
+// K1 MUSE Book --- (DirNode get_or_create_dir / SymlinkNode target is verbatim)
+#[ktest]
+fn dir_nodes_are_shared_levels() {
+    let devices = DirNode::new("devices".into());
+
+    let platform = devices.get_or_create_dir("platform".into()).unwrap();
+    let platform_again = devices.get_or_create_dir("platform".into()).unwrap();
+    assert_eq!(platform.id(), platform_again.id());
+    assert_eq!(devices.count_children(), 1);
+
+    let device = DeviceNode::new("gpu@d8100000".into());
+    platform.add_child(device.clone()).unwrap();
+    assert!(platform.child("gpu@d8100000").is_some());
+
+    assert!(matches!(
+        platform.get_or_create_dir("gpu@d8100000".into()),
+        Err(Error::AlreadyExists)
+    ));
+    assert!(platform.child_dir("gpu@d8100000").is_none());
+
+    let removed = platform.remove_child("gpu@d8100000").unwrap();
+    assert_eq!(removed.id(), device.id());
+}
+
+#[ktest]
+fn symlink_nodes_keep_their_target_verbatim() {
+    let link = super::SymlinkNode::new("subsystem".into(), "../../../bus/platform".to_string());
+
+    assert_eq!(link.type_(), SysNodeType::Symlink);
+    assert_eq!(link.target_path(), "../../../bus/platform");
+    assert_eq!(
+        link.cast_to_symlink().unwrap().target_path(),
+        "../../../bus/platform"
+    );
+}
+// K1 MUSE Book ---
 
 #[ktest]
 fn error_handling() {

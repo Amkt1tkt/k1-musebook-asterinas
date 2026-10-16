@@ -1,0 +1,3 @@
+// SPDX-License-Identifier: MPL-2.0
+// K1 MUSE Book: retain the panel's built-in Dock auto-hide behavior.
+Some((wait_time: 500, transition_time: 200, handle_size: 2))

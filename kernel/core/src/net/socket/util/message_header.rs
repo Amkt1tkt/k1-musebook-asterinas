@@ -101,12 +101,22 @@ impl ControlMessage {
         }
     }
 
-    pub(crate) fn write_all_to(msgs: &[Self], writer: &mut VmWriter) -> (usize, RecvFlags) {
+    // K1 MUSE Book --- (MSG_CMSG_CLOEXEC: `recv_flags.fd_flags()` applies to SCM_RIGHTS fds)
+    // K1 MUSE Book --- (preserve received descriptor flags and report control truncation)
+    //     pub(crate) fn write_all_to(msgs: &[Self], writer: &mut VmWriter) -> (usize, RecvFlags) {
+    //             let (header, message_flags) = match msg.write_to(writer) {
+    pub(crate) fn write_all_to(
+        msgs: &[Self],
+        writer: &mut VmWriter,
+        recv_flags: RecvFlags,
+    ) -> (usize, RecvFlags) {
+        let fd_flags = recv_flags.fd_flags();
+        // K1 MUSE Book ---
         let mut len = 0;
         let mut output_flags = RecvFlags::empty();
 
         for msg in msgs.iter() {
-            let (header, message_flags) = match msg.write_to(writer) {
+            let (header, message_flags) = match msg.write_to(writer, fd_flags) {
                 Ok(result) => result,
                 // This occurs when the buffer is too short or when some page faults cannot be
                 // handled. However, at this point, there is no good way to report the errors to
@@ -128,12 +138,21 @@ impl ControlMessage {
 
         (len, output_flags)
     }
+    // K1 MUSE Book ---
 
-    fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
+    // K1 MUSE Book --- (preserve received descriptor flags and report control truncation)
+    //     fn write_to(&self, writer: &mut VmWriter) -> Result<(CControlHeader, RecvFlags)> {
+    //             Self::Unix(msg) => msg.write_to(writer),
+    fn write_to(
+        &self,
+        writer: &mut VmWriter,
+        fd_flags: crate::fs::file::file_table::FdFlags,
+    ) -> Result<(CControlHeader, RecvFlags)> {
         match self {
-            Self::Unix(msg) => msg.write_to(writer),
+            Self::Unix(msg) => msg.write_to(writer, fd_flags),
         }
     }
+    // K1 MUSE Book ---
 }
 
 /// `cmsghdr` in Linux.

@@ -21,7 +21,10 @@ use ostd::{boot::EarlyCmdline, log::LevelFilter};
 /// Kernel command-line keys consumed by [`early_cmdline_parser`].
 ///
 /// These are stripped during dispatch so they are not forwarded to init.
-const EARLY_PARAMS: &[&str] = &["earlycon", "loglevel"];
+// K1 MUSE Book --- (DTS bootargs use ostd.log_level=; strip it like loglevel)
+// const EARLY_PARAMS: &[&str] = &["earlycon", "loglevel"];
+const EARLY_PARAMS: &[&str] = &["earlycon", "loglevel", "ostd.log_level"];
+// K1 MUSE Book ---
 
 /// Returns whether `key` is handled only by the early parser.
 pub(super) fn is_early_param(key: &str) -> bool {
@@ -38,6 +41,9 @@ pub(super) fn is_early_param(key: &str) -> bool {
 /// - `earlycon` — enables the early UART console (exact token match).
 /// - `loglevel=N` — sets the OSTD log filter (`N` in `0..=8`, see [`LevelFilter`]).
 /// - `loglevel=LEVEL` — also accepts textual levels such as `error` or `debug`.
+// K1 MUSE Book --- (document the DTS log-level spelling accepted on K1)
+/// - `ostd.log_level=LEVEL` — K1 DTS spelling; same values as `loglevel=`.
+// K1 MUSE Book ---
 /// - `--` — stops parsing; all following tokens are for the init process.
 ///
 /// Double quotes (`"`) protect spaces inside one token (Linux-compatible).
@@ -86,6 +92,14 @@ const fn early_cmdline_parser(cmdline: &str) -> EarlyCmdline {
         {
             log_level = parsed_log_level;
         }
+        // K1 MUSE Book --- (DTS / BOARD.md spelling; same values as loglevel=)
+        else if let Some((key, value)) = token.split_at_checked(15)
+            && matches!(key, b"ostd.log_level=")
+            && let Some(parsed_log_level) = parse_loglevel_at(value)
+        {
+            log_level = parsed_log_level;
+        }
+        // K1 MUSE Book ---
     }
 
     EarlyCmdline {
@@ -158,6 +172,9 @@ mod tests {
     fn is_early_param_recognizes_early_keys() {
         assert!(is_early_param("earlycon"));
         assert!(is_early_param("loglevel"));
+        // K1 MUSE Book --- (ostd.log_level= is the DTS spelling)
+        assert!(is_early_param("ostd.log_level"));
+        // K1 MUSE Book ---
         assert!(!is_early_param("log_level"));
         assert!(!is_early_param("unknown"));
     }
@@ -262,4 +279,22 @@ mod tests {
         assert_eq!(result.log_level, LevelFilter::Off);
         assert!(result.has_early_console);
     }
+
+    // K1 MUSE Book --- (alias used by k1_muse_book.dts bootargs)
+    #[ktest]
+    fn early_cmdline_parser_ostd_log_level() {
+        assert_eq!(
+            early_cmdline_parser("ostd.log_level=error").log_level,
+            LevelFilter::Error
+        );
+        assert_eq!(
+            early_cmdline_parser("ostd.log_level=off").log_level,
+            LevelFilter::Off
+        );
+        assert_eq!(
+            early_cmdline_parser("loglevel=debug ostd.log_level=error").log_level,
+            LevelFilter::Error
+        );
+    }
+    // K1 MUSE Book ---
 }

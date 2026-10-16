@@ -1,0 +1,19 @@
+# SPDX-License-Identifier: MPL-2.0
+
+[package]
+name = "k1-musebook-power"
+version = "0.1.0"
+edition.workspace = true
+
+# K1 MUSE Book: SBS smart battery on TWSI5 (Muse Book `battery@b`).
+
+[dependencies]
+aster-cmdline.workspace = true
+component.workspace = true
+k1-musebook-i2c.workspace = true
+log.workspace = true
+ostd.workspace = true
+spin.workspace = true
+
+[lints]
+workspace = true

@@ -39,6 +39,11 @@ _start:
     ori    t0, t0, PTE_V
     sd     t0, 0(t1)
 
+    # K1 MUSE Book --- (writing SATP MODE=Sv48 hangs the Sv39-only X60)
+    li     t2, {USE_SV48}
+    beqz   t2, .Lboot_try_sv39
+    # K1 MUSE Book ---
+
     # Try loading the Sv48 page table.
     lla    t0, sv48_boot_l4pt
     li     t1, SATP_MODE_SV48
@@ -51,6 +56,9 @@ _start:
     csrr   t1, satp
     beq    t0, t1, bsp_flush_tlb
 
+# K1 MUSE Book --- (direct Sv39 entry for K1)
+.Lboot_try_sv39:
+# K1 MUSE Book ---
     # Try loading the Sv39 page table.
     lla    t0, sv39_boot_l3pt
     li     t1, SATP_MODE_SV39

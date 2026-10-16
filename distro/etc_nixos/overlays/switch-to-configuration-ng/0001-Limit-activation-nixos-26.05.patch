@@ -1,0 +1,77 @@
+SPDX-License-Identifier: MPL-2.0
+K1 MUSE Book: preserve boot/check and reject unsupported activation before side effects.
+
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1323,6 +1323,12 @@
+ }
+ 
+ /// Performs switch-to-configuration functionality for a single non-root user
++// K1 MUSE Book --- (board sessions do not support user-manager activation)
++#[expect(
++    dead_code,
++    reason = "board sessions do not support user-manager activation"
++)]
++// K1 MUSE Book ---
+ fn do_user_switch(parent_exe: String) -> anyhow::Result<()> {
+     if Path::new(&parent_exe)
+         != Path::new("/proc/self/exe")
+@@ -1743,15 +1749,24 @@
+ }
+ 
+ fn usage(argv0: &str) -> ! {
++    // K1 MUSE Book --- (advertise only supported activation actions)
++    // eprintln!(
++    // r#"Usage: {argv0} [check|switch|boot|test|dry-activate]
++    // check:        run pre-switch checks and exit
++    // switch:       make the configuration the boot default and activate now
++    // boot:         make the configuration the boot default
++    // test:         activate the configuration, but don't make it the boot default
++    // dry-activate: show what would be done if this configuration were activated
++    // "#
++    // );
+     eprintln!(
+-        r#"Usage: {argv0} [check|switch|boot|test|dry-activate]
+-check:        run pre-switch checks and exit
+-switch:       make the configuration the boot default and activate now
+-boot:         make the configuration the boot default
+-test:         activate the configuration, but don't make it the boot default
+-dry-activate: show what would be done if this configuration were activated
+-"#
++        r#"Usage: {} [check|boot]
++check: run pre-switch checks and exit
++boot:  prepare the configuration for the next boot; reboot to apply it
++"#,
++        argv0
+     );
++    // K1 MUSE Book ---
+     std::process::exit(1);
+ }
+ 
+@@ -2686,7 +2701,10 @@
+ 
+ fn main() -> anyhow::Result<()> {
+     match std::env::var("__NIXOS_SWITCH_TO_CONFIGURATION_PARENT_EXE").ok() {
+-        Some(parent_exe) => do_user_switch(parent_exe),
++        // K1 MUSE Book --- (reject user activation before any state changes)
++        // Some(parent_exe) => do_user_switch(parent_exe),
++        Some(_) => bail!("Asterinas does not support user-manager activation"),
++        // K1 MUSE Book ---
+         None => {
+             let mut args = std::env::args();
+             let argv0 = args.next().ok_or(anyhow!("no argv[0]"))?;
+@@ -2698,6 +2716,14 @@
+             let Some(Ok(action)) = args.next().map(|a| Action::from_str(&a)) else {
+                 usage(argv0);
+             };
++
++            // K1 MUSE Book --- (online activation needs unsupported login management)
++            if !matches!(action, Action::Boot | Action::Check) {
++                bail!(
++                    "Asterinas supports only boot/check activation; use nixos-rebuild boot, then reboot"
++                );
++            }
++            // K1 MUSE Book ---
+ 
+             if unsafe { nix::libc::geteuid() } == 0 {
+                 do_system_switch(action)

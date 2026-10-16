@@ -13,6 +13,167 @@
 # as performed by a generic init process.
 # It should later be replaced by the actual init process.
 
+# K1 MUSE Book --- (stage-1 block-root checking and init handoff)
+# Handoff keys after the kernel command line's `--` select an ext2 block root
+# and its init executable. With no block-root handoff, preserve the upstream
+# initramfs flow and pass only non-handoff arguments to its command.
+NEW_ROOT=""
+NEW_INIT=""
+BREAK=""
+FSCK=""
+# Remaining argv after stripping the handoff keys; it is what the upstream flow
+# below runs.
+for arg in "$@"; do
+    shift
+    case "$arg" in
+        root=*) NEW_ROOT="${arg#root=}" ;;
+        init=*) NEW_INIT="${arg#init=}" ;;
+        rd.break=*) BREAK="${arg#rd.break=}" ;;
+        fsck=*) FSCK="${arg#fsck=}" ;;
+        *) set -- "$@" "$arg" ;;
+    esac
+done
+FSCK="${FSCK:-auto}"
+
+mount -t devtmpfs devtmpfs /dev
+mount -t proc none /proc 2>/dev/null
+
+# Check the root before mounting it. ext2 has no journal and the kernel writes
+# back lazily, so every hard power-off leaves work for e2fsck; running it here,
+# on the unmounted device, is the only place it can repair anything.
+# fsck=auto (default): `e2fsck -p`, which only does a full pass when the
+# superblock says the last session did not end with a clean unmount (the
+# kernel clears VALID at mount and sets it in reboot(2)). fsck=force: full
+# `e2fsck -f -y` regardless. fsck=skip: do not touch the disk.
+check_root() {
+    dev="$1"
+    if [ "$FSCK" != "skip" ] && [ ! -x /bin/e2fsck ]; then
+        echo "[init] fsck: no /bin/e2fsck in this initramfs; cannot check root"
+        return 8
+    fi
+    case "$FSCK" in
+        skip)
+            echo "[init] fsck=skip: not checking $dev"
+            return 0
+            ;;
+        force)
+            echo "[init] fsck=force: e2fsck -f -y $dev (full check, this takes a while)"
+            set -- -f -y
+            ;;
+        *)
+            echo "[init] fsck: e2fsck -p $dev"
+            set -- -p
+            ;;
+    esac
+    t0=$(date +%s)
+    e2fsck "$@" "$dev" < /dev/null
+    rc=$?
+    t1=$(date +%s)
+    # e2fsck exit status is a bitmask: 1 = errors corrected, 2 = corrected and
+    # a reboot is advised, 4 = errors left uncorrected, 8 = operational error,
+    # 16 = usage error, 32 = cancelled, 128 = shared library error.
+    echo "[init] fsck: e2fsck exit=$rc in $((t1 - t0))s"
+    if [ "$rc" -eq 4 ] && [ "$FSCK" != "force" ]; then
+        echo "[init] fsck: -p could not fix everything; retrying with -f -y"
+        e2fsck -f -y "$dev" < /dev/null
+        rc=$?
+        t1=$(date +%s)
+        echo "[init] fsck: e2fsck -f -y exit=$rc total=$((t1 - t0))s"
+    fi
+    # Do not mount after an operational error, incomplete repair or a request
+    # to reboot. In particular, exit 8 must not silently turn into success.
+    case "$rc" in
+        0|1) return 0 ;;
+        *)
+            echo "[init] fsck: root not mounted (exit=$rc); inspect the errors before retrying"
+            return "$rc"
+            ;;
+    esac
+}
+
+if [ "$BREAK" = "1" ]; then
+    echo "[init] rd.break=1: dropping to initramfs shell"
+    exec /bin/sh
+fi
+
+# Restore mounts after a partially prepared handoff. If a mount cannot move
+# back, retain the new root and provide the same path through a recovery alias.
+restore_handoff_proc() {
+    if mount --move /newroot/proc /proc; then
+        return 0
+    fi
+    if rmdir /proc && ln -s /newroot/proc /proc; then
+        RECOVERY_ALIAS=1
+        echo "[init] recovery: /proc remains mounted under /newroot"
+        return 0
+    fi
+    RECOVERY_ALIAS=1
+    echo "[init] recovery: use /newroot/proc; restoring /proc failed"
+    return 1
+}
+
+recover_handoff() {
+    echo "[init] handoff failed: entering initramfs recovery shell"
+    RECOVERY_ALIAS=0
+    if [ "$MOVED_PROC" = 1 ]; then
+        restore_handoff_proc || :
+    elif [ "$CREATED_PROC" = 1 ]; then
+        if ! umount /newroot/proc; then
+            RECOVERY_ALIAS=1
+            echo "[init] recovery: retaining /newroot with its proc mount"
+        fi
+    fi
+    if [ "$RECOVERY_ALIAS" = 0 ]; then
+        umount /newroot 2>/dev/null || :
+    fi
+    exec /bin/sh
+}
+
+if [ -n "$NEW_ROOT" ] && [ -b "$NEW_ROOT" ]; then
+    if [ -z "$NEW_INIT" ]; then
+        # No handoff is possible; leave the disk and live initramfs mounts alone.
+        echo "[init] no init= for $NEW_ROOT; staying in initramfs"
+    else
+        if ! check_root "$NEW_ROOT"; then
+            echo "[init] fsck failed: entering initramfs recovery shell"
+            exec /bin/sh
+        fi
+        MOVED_PROC=0
+        CREATED_PROC=0
+        if ! mkdir -p /newroot || ! mount -t ext2 "$NEW_ROOT" /newroot; then
+            recover_handoff
+        fi
+        if ! mkdir -p /newroot/dev /newroot/proc /dev/pts; then
+            recover_handoff
+        fi
+        # Provide the devpts slave-master layout expected by posix_openpt().
+        if ! mount -t devpts devpts /dev/pts || ! chmod 0666 /dev/pts/ptmx ||
+           ! ln -sfn pts/ptmx /dev/ptmx; then
+            recover_handoff
+        fi
+        # Move proc before dev, so any failure before the final move retains
+        # the initramfs device namespace needed by the recovery shell.
+        if mount --move /proc /newroot/proc; then
+            MOVED_PROC=1
+        elif mount -t proc none /newroot/proc; then
+            CREATED_PROC=1
+        else
+            recover_handoff
+        fi
+        if ! mount --move /dev /newroot/dev; then
+            recover_handoff
+        fi
+        echo "[init] switch_root $NEW_ROOT -> $NEW_INIT"
+        exec switch_root /newroot "$NEW_INIT"
+    fi
+elif [ -n "$NEW_ROOT" ]; then
+    echo "[init] root=$NEW_ROOT is not a block device; staying in initramfs"
+    ls /dev
+fi
+
+# Continue the upstream QEMU or interactive flow with handoff keys removed.
+# K1 MUSE Book ---
+
 if [ "$#" -eq 0 ]; then
     echo "No arguments were provided to the init process. Spawn a shell by default."
     echo "Usage: $0 <prog> [args...]"
@@ -20,7 +181,12 @@ if [ "$#" -eq 0 ]; then
 fi
 
 mount -t sysfs none /sys
-mount -t proc none /proc
+# K1 MUSE Book --- (stage 1 already mounted proc before checking the root)
+# mount -t proc none /proc
+if ! grep -q '^[^ ]* /proc proc ' /proc/mounts; then
+    mount -t proc none /proc
+fi
+# K1 MUSE Book ---
 mount -t cgroup2 none /sys/fs/cgroup
 mount -t configfs none /sys/kernel/config
 
@@ -38,9 +204,23 @@ mount -t devpts devpts /dev/pts
 chmod 0666 /dev/pts/ptmx
 ln -s pts/ptmx /dev/ptmx
 
-if [ -b /dev/vda ]; then
+# K1 MUSE Book --- (check the optional ext2 image before mounting it)
+# if [ -b /dev/vda ]; then
+#     mount -t ext2 /dev/vda /ext2
+# fi
+if [ -r /proc/cmdline ]; then
+    # Kernel handoff parameters are whitespace-separated words.
+    # shellcheck disable=SC2013
+    for arg in $(cat /proc/cmdline); do
+        case "$arg" in
+            fsck=*) FSCK="${arg#fsck=}" ;;
+        esac
+    done
+fi
+if [ -b /dev/vda ] && check_root /dev/vda; then
     mount -t ext2 /dev/vda /ext2
 fi
+# K1 MUSE Book ---
 
 if [ -b /dev/vdb ]; then
     mount -t exfat /dev/vdb /exfat

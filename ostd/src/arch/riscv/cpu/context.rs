@@ -180,9 +180,11 @@ impl UserContextApiInternal for UserContext {
     fn execute<T: UserModeHooks>(&mut self, hooks: &T) -> ReturnReason {
         loop {
             crate::task::scheduler::might_preempt();
-
             let guard = crate::irq::disable_local();
             hooks.pre_user_run(&guard);
+            // K1 MUSE Book --- (pin the hart through I-cache synchronization and user entry)
+            crate::arch::mm::sync_local_icache_for_user(&guard);
+            // K1 MUSE Book ---
             self.user_context.run(guard);
 
             let scause = riscv::register::scause::read();

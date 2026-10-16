@@ -71,6 +71,18 @@ x86_64.workspace = true
 
 [target.riscv64imac-unknown-none-elf.dependencies]
 riscv.workspace = true
+# K1 MUSE Book --- (SpacemiT K1 MUSE Book board components; riscv64-only so the other
+#   architectures never see them. The optional ones are gated by the features below.)
+k1-musebook-cpufreq = { workspace = true, optional = true }
+k1-musebook-drm.workspace = true
+k1-musebook-gpio.workspace = true
+k1-musebook-i2c.workspace = true
+k1-musebook-pinctrl.workspace = true
+k1-musebook-power.workspace = true
+k1-musebook-pvr = { workspace = true, optional = true }
+k1-musebook-thermal.workspace = true
+k1-musebook-usb.workspace = true
+# K1 MUSE Book ---
 
 [target.loongarch64-unknown-none-softfloat.dependencies]
 loongArch64.workspace = true
@@ -82,6 +94,15 @@ cvm_guest = ["dep:tdx-guest", "ostd/cvm_guest", "aster-virtio/cvm_guest"]
 pvh_boot = ["ostd/pvh_boot"]
 # By default we use the Sv48 address translation mode.
 riscv_sv39_mode = ["ostd/riscv_sv39_mode"]
+# K1 MUSE Book --- (board features used with the explicit OSDK k1 scheme)
+# PowerVR BXE-2-32 GPU driver (safe-Rust port of the upstream `powervr` DRM driver).
+pvr = ["dep:k1-musebook-pvr"]
+# SpacemiT K1 DVFS (OPP table + SPM8821 dcdc1 scaling + TSEN thermal capping).
+cpufreq = ["dep:k1-musebook-cpufreq"]
+# USB3 xHCI host + mass storage + HID on the K1 DWC3. The USB crate itself is
+# always linked for the EHCI1/USB2 path; this only enables its `xhci` feature.
+usb = ["k1-musebook-usb/xhci"]
+# K1 MUSE Book ---
 
 [lints]
 workspace = true

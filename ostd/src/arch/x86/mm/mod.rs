@@ -117,6 +117,28 @@ pub(crate) fn can_sync_dma() -> bool {
     true
 }
 
+// K1 MUSE Book --- (arch-neutral DMA/uncacheable API used by generic mm)
+/// Whether a mapping asked to be uncacheable will actually be uncacheable.
+pub(crate) fn can_map_uncacheable() -> bool {
+    true
+}
+
+/// Exclusive upper bound on physical addresses that 32-bit DMA masters
+/// can program. Matches Linux `ZONE_DMA32` (4 GiB).
+pub(crate) fn dma_addr_limit() -> Paddr {
+    0x1_0000_0000
+}
+// K1 MUSE Book ---
+
+// K1 MUSE Book --- (order normal memory and device MMIO at DMA publication)
+// MFENCE orders loads/stores across cacheable, uncacheable, and WC mappings.
+pub(crate) fn dma_io_fence() {
+    // SAFETY: This baseline architecture barrier neither accesses memory nor
+    // changes register ownership. Omitting `nomem` also orders compiler accesses.
+    unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
+}
+// K1 MUSE Book ---
+
 /// # Safety
 ///
 /// The caller must ensure that

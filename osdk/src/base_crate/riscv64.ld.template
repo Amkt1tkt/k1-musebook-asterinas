@@ -1,9 +1,17 @@
 ENTRY(_start)
 OUTPUT_ARCH(riscv)
 
-KERNEL_LMA = 0x80200000;
-KERNEL_VMA = 0xffffffff80200000;
-KERNEL_VMA_OFFSET = KERNEL_VMA - KERNEL_LMA;
+# K1 MUSE Book --- (board load addresses are selected by the OSDK scheme)
+# Preserve the upstream QEMU virt default. The k1 scheme passes
+# --defsym=KERNEL_LMA=0x200000 before -T; PROVIDE keeps that explicit value.
+# Both platforms use the same VA offset and existing 0..3 GiB boot mappings.
+# KERNEL_LMA = 0x80200000;
+# KERNEL_VMA = 0xffffffff80200000;
+# KERNEL_VMA_OFFSET = KERNEL_VMA - KERNEL_LMA;
+PROVIDE(KERNEL_LMA = 0x80200000);
+KERNEL_VMA_OFFSET = 0xffffffff00000000;
+KERNEL_VMA = KERNEL_LMA + KERNEL_VMA_OFFSET;
+# K1 MUSE Book ---
 
 SECTIONS
 {

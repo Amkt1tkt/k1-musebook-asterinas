@@ -22,6 +22,13 @@ NO_DEFAULT_FEATURES ?= 0
 COVERAGE ?= 0
 INITRAMFS ?= on
 CMDLINE ?=
+# K1 MUSE Book --- (narrow `make ktest` to one crate / one test name)
+# KTEST_CRATE selects a crate directory; empty runs the default workspace members.
+# KTEST_NAME filters the suffix of module_path::fn_name. It must not be a crate
+# name: OSDK also uses it as a test-name filter, which would select no tests.
+KTEST_CRATE ?=
+KTEST_NAME ?=
+# K1 MUSE Book ---
 
 # Specify the primary system console (supported: tty0, ttyS0, hvc0).
 # - tty0: The active virtual terminal (VT).
@@ -447,7 +454,14 @@ ktest: initramfs $(CARGO_OSDK)
 	@# cargo-osdk tests default workspace members.
 	@# `linux-bzimage-setup` is left out of `default-members`
 	@# because it is hard to unit test.
-	@cargo osdk test $(CARGO_OSDK_TEST_ARGS)
+	# K1 MUSE Book --- (KTEST_CRATE / KTEST_NAME knobs)
+	# @cargo osdk test $(CARGO_OSDK_TEST_ARGS)
+	@# `KTEST_CRATE` works by changing directory rather than by passing a package
+	@# flag, which cargo-osdk does not have. Relative paths in the manifest still
+	@# resolve, because OSDK evaluates them against the directory holding
+	@# OSDK.toml rather than the current one.
+	@cd $(if $(KTEST_CRATE),$(KTEST_CRATE),.) && cargo osdk test $(KTEST_NAME) $(CARGO_OSDK_TEST_ARGS)
+	# K1 MUSE Book ---
 
 .PHONY: docs
 docs: private DEFAULT_PACKAGE_NAMES = \

@@ -1,9 +1,22 @@
 // SPDX-License-Identifier: MPL-2.0
 
+// K1 MUSE Book --- (libudev uevent monitor compatibility)
+//! Common netlink socket implementation.
+//!
+//! `NETLINK_KOBJECT_UEVENT` accepts `SO_ATTACH_FILTER` and `SO_DETACH_FILTER`
+//! for libudev initialization. Attachment checks the instruction count and
+//! buffer accessibility; it does not validate or execute cBPF instructions.
+//! The kernel emits no uevents and libudev also applies its filters in user
+//! space. Other protocols reject these options until filtering is implemented.
+// K1 MUSE Book ---
+
 pub(super) use bound::BoundNetlink;
 use unbound::UnboundNetlink;
 
 use super::{GroupIdSet, NetlinkSocketAddr};
+// K1 MUSE Book --- (SO_ATTACH_FILTER / SO_DETACH_FILTER)
+use crate::net::socket::options::{AttachFilter, DetachFilter, validate_classic_bpf_len};
+// K1 MUSE Book ---
 use crate::{
     events::IoEvents,
     fs::file::FileCommon,
@@ -30,6 +43,10 @@ use crate::{
 };
 
 mod bound;
+// K1 MUSE Book --- (ktests for the socket-filter no-op)
+#[cfg(ktest)]
+mod test;
+// K1 MUSE Book ---
 mod unbound;
 
 pub(crate) struct NetlinkSocket<P: SupportedNetlinkProtocol> {
@@ -45,12 +62,19 @@ pub(crate) struct NetlinkSocket<P: SupportedNetlinkProtocol> {
 #[derive(Clone, Debug)]
 struct OptionSet {
     socket: SocketOptionSet,
+    // K1 MUSE Book --- (SO_ATTACH_FILTER / SO_DETACH_FILTER)
+    /// Whether `SO_ATTACH_FILTER` has attached a (unevaluated) program.
+    filter_attached: bool,
+    // K1 MUSE Book ---
 }
 
 impl OptionSet {
     pub(self) fn new() -> Self {
         Self {
             socket: SocketOptionSet::new_netlink(),
+            // K1 MUSE Book --- (SO_ATTACH_FILTER / SO_DETACH_FILTER)
+            filter_attached: false,
+            // K1 MUSE Book ---
         }
     }
 }
@@ -182,9 +206,17 @@ where
         writer: &mut dyn MultiWrite,
         flags: RecvFlags,
     ) -> Result<(RecvOutput, MessageHeader)> {
-        let (output, addr) = self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
-            self.try_recv(writer, flags)
-        })?;
+        // K1 MUSE Book --- (MSG_DONTWAIT; see `SocketPrivate::block_on_unless`)
+        //         let (output, addr) = self.block_on(IoEvents::IN, self.timeouts.recv_timeout(), || {
+        //             self.try_recv(writer, flags)
+        //         })?;
+        let (output, addr) = self.block_on_unless(
+            flags.dont_wait(),
+            IoEvents::IN,
+            self.timeouts.recv_timeout(),
+            || self.try_recv(writer, flags),
+        )?;
+        // K1 MUSE Book ---
 
         // TODO: Receive control message
 
@@ -215,6 +247,21 @@ where
     }
 
     fn set_option(&self, option: &dyn SocketOption) -> Result<()> {
+        // K1 MUSE Book --- (restrict unevaluated filter compatibility to uevents)
+        if P::ACCEPTS_UNEVALUATED_FILTER {
+            let mut options = self.options.write();
+            sock_option_ref!(match option {
+                attach @ AttachFilter => {
+                    return attach_socket_filter(&mut options, attach);
+                }
+                detach @ DetachFilter => {
+                    return detach_socket_filter(&mut options, detach);
+                }
+                _ => (),
+            });
+        }
+        // K1 MUSE Book ---
+
         let mut inner = self.inner.write();
 
         // Deal with socket-level options
@@ -303,6 +350,28 @@ impl<P: SupportedNetlinkProtocol> Inner<UnboundNetlink<P>, BoundNetlink<P::Messa
         }
     }
 }
+
+// K1 MUSE Book --- (SO_ATTACH_FILTER / SO_DETACH_FILTER bookkeeping)
+fn attach_socket_filter(options: &mut OptionSet, attach: &AttachFilter) -> Result<()> {
+    let len = *attach.get().unwrap();
+    validate_classic_bpf_len(len)?;
+    options.filter_attached = true;
+    debug!("SO_ATTACH_FILTER accepted a classic BPF program on a netlink socket; not evaluated");
+    Ok(())
+}
+
+fn detach_socket_filter(options: &mut OptionSet, detach: &DetachFilter) -> Result<()> {
+    // The raw option has validated the required int-sized userspace value;
+    // filter detachment itself does not use that value.
+    debug_assert!(detach.get().is_some());
+
+    if !options.filter_attached {
+        return_errno_with_message!(Errno::ENOENT, "no socket filter is attached");
+    }
+    options.filter_attached = false;
+    Ok(())
+}
+// K1 MUSE Book ---
 
 fn do_netlink_setsockopt<P: SupportedNetlinkProtocol>(
     option: &dyn SocketOption,

@@ -10,6 +10,13 @@
   # Keep NixOS host platform aligned with the selected target architecture.
   config.nixpkgs.hostPlatform = lib.mkDefault "@aster-target-platform@";
 
+  # K1 MUSE Book --- (reject unsupported activation before changing profiles)
+  # system.rebuild.enableNg = false; # inherited 25.05 default
+  config.system.rebuild = lib.optionalAttrs (lib.trivial.release == "25.05") {
+    enableNg = true;
+  };
+  # K1 MUSE Book ---
+
   # Imports all Nix files located under the 'modules' directory.
   #
   # Each Nix file within the 'modules' directory contributes a specific part to the overall 'configuration.nix'.
@@ -37,6 +44,9 @@
   # For details on the overlay file definition format,
   # please refer to https://nixos.org/manual/nixpkgs/stable/#sec-overlays-definition.
   config.nixpkgs.overlays = [
+    # K1 MUSE Book --- (pin -C target-feature=-v on every riscv64 buildRustPackage)
+    (import ./overlays/no-rvv-rust/default.nix)
+    # K1 MUSE Book ---
     (import ./overlays/desktop/default.nix)
     (import ./overlays/fastfetch/default.nix)
     (import ./overlays/hello-asterinas/default.nix)

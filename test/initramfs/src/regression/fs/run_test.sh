@@ -154,6 +154,9 @@ TEST_TMPDIR=/ext2 TEST_DIRECT=1 ./empty_write/empty_write
 ./procfs/proc_sys_kernel
 ./procfs/tid
 
+# K1 MUSE Book --- (lookup must not transfer ownership of kernel sysfs nodes)
+./pseudofs/sysfs_owner
+# K1 MUSE Book ---
 ./pseudofs/fallocate
 ./pseudofs/memfd_access_err
 ./pseudofs/memfd_create

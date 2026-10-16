@@ -9,9 +9,15 @@ mod util;
 mod vm_mapping;
 
 mod vmar_impls;
+// K1 MUSE Book --- (demand-paged GEM/device mmap used by Mesa/COSMIC)
+pub(crate) mod on_demand;
+// K1 MUSE Book ---
 
 use ostd::mm::Vaddr;
 
+// K1 MUSE Book --- (SIGBUS for a refused device page)
+pub(crate) use self::vmar_impls::page_fault::{PageFaultFailure, PageFaultSignal};
+// K1 MUSE Book ---
 pub(crate) use self::{
     handle::VmarHandle,
     rmap::{Rmap, RmapEntry},

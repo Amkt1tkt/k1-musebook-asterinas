@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
+# K1 MUSE Book: generated Cargo build output and locked vendor dependencies.
+/target
+/vendor

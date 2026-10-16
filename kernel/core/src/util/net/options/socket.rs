@@ -3,16 +3,22 @@
 use ostd::mm::VmIo;
 
 use super::{RawSocketOption, impl_raw_sock_option_get_only, impl_raw_socket_option};
+// K1 MUSE Book --- (SO_ATTACH_FILTER / SO_DETACH_FILTER)
+use crate::net::socket::options::{AttachFilter, DetachFilter, validate_classic_bpf_len};
+// K1 MUSE Book ---
+// K1 MUSE Book --- (expose desktop socket-option compatibility types)
+//         SendTimeout, SocketOption, SocketType,
 use crate::{
     context::current_userspace,
     net::socket::options::{
         AcceptConn, Broadcast, Error, KeepAlive, Linger, PassCred, PeerCred, PeerGroups, Priority,
         RecvBuf, RecvBufForce, RecvTimeout, ReuseAddr, ReusePort, SendBuf, SendBufForce,
-        SendTimeout, SocketOption, SocketType,
+        SendTimeout, SocketOption, SocketType, Timestamp,
     },
     prelude::*,
     process::Gid,
 };
+// K1 MUSE Book ---
 
 /// Socket level options.
 ///
@@ -43,6 +49,9 @@ enum CSocketOptionName {
     SNDTIMEO_OLD = 21,
     ATTACH_FILTER = 26,
     DETACH_FILTER = 27,
+    // K1 MUSE Book --- (SO_TIMESTAMP; journald requires the setsockopt to succeed)
+    TIMESTAMP_OLD = 29,
+    // K1 MUSE Book ---
     ACCPETCONN = 30,
     PEERSEC = 31,
     SNDBUFFORCE = 32,
@@ -76,6 +85,15 @@ pub(crate) fn new_socket_option(name: i32) -> Result<Box<dyn RawSocketOption>> {
         CSocketOptionName::REUSEPORT => Ok(Box::new(ReusePort::new())),
         CSocketOptionName::PASSCRED => Ok(Box::new(PassCred::new())),
         CSocketOptionName::PEERCRED => Ok(Box::new(PeerCred::new())),
+        // K1 MUSE Book --- (accept SO_TIMESTAMP; stored, no cmsg)
+        CSocketOptionName::TIMESTAMP_OLD => Ok(Box::new(Timestamp::new())),
+        // K1 MUSE Book ---
+        // K1 MUSE Book --- (produced here because they are `SOL_SOCKET` names; only netlink
+        //   sockets handle them, as an unevaluated no-op, other families still get
+        //   `ENOPROTOOPT` from `SocketOptionSet`)
+        CSocketOptionName::ATTACH_FILTER => Ok(Box::new(AttachFilter::new())),
+        CSocketOptionName::DETACH_FILTER => Ok(Box::new(DetachFilter::new())),
+        // K1 MUSE Book ---
         CSocketOptionName::ACCPETCONN => Ok(Box::new(AcceptConn::new())),
         CSocketOptionName::SNDBUFFORCE => Ok(Box::new(SendBufForce::new())),
         CSocketOptionName::RCVBUFFORCE => Ok(Box::new(RecvBufForce::new())),
@@ -97,6 +115,9 @@ impl_raw_socket_option!(RecvTimeout);
 impl_raw_socket_option!(SendTimeout);
 impl_raw_socket_option!(ReusePort);
 impl_raw_socket_option!(PassCred);
+// K1 MUSE Book --- (SO_TIMESTAMP get/set)
+impl_raw_socket_option!(Timestamp);
+// K1 MUSE Book ---
 impl_raw_sock_option_get_only!(PeerCred);
 impl_raw_sock_option_get_only!(AcceptConn);
 impl_raw_socket_option!(SendBufForce);
@@ -134,3 +155,100 @@ impl RawSocketOption for PeerGroups {
         self
     }
 }
+
+// K1 MUSE Book --- (decode the userspace `struct sock_fprog` for SO_ATTACH_FILTER so that
+//   bad pointers yield EFAULT and bad lengths EINVAL; the instructions
+//   themselves are discarded because no socket family evaluates cBPF in this port)
+/// Userspace `struct sock_filter` (`include/uapi/linux/filter.h`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod)]
+struct CSockFilter {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+}
+
+/// Userspace `struct sock_fprog` on LP64 (`include/uapi/linux/filter.h`).
+///
+/// Layout is 16 bytes with the filter pointer at offset 8.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod)]
+struct CSockFprog {
+    len: u16,
+    _pad: [u8; 6],
+    filter: Vaddr,
+}
+
+const _: () = {
+    assert!(size_of::<CSockFilter>() == 8);
+    assert!(size_of::<CSockFprog>() == 16);
+    assert!(core::mem::offset_of!(CSockFprog, filter) == 8);
+};
+
+/// Reads a userspace `struct sock_fprog` and copies the filter program so a
+/// bad pointer yields `EFAULT`. The instructions themselves are discarded.
+fn read_sock_fprog_from_user(addr: Vaddr, max_len: u32) -> Result<u16> {
+    // Linux sk_setsockopt checks and copies an int before filter-specific
+    // optlen validation. Preserve EFAULT precedence for inaccessible optval.
+    if (max_len as usize) < size_of::<i32>() {
+        return_errno_with_message!(Errno::EINVAL, "the socket option is shorter than an int");
+    }
+    current_userspace!().read_val::<i32>(addr)?;
+    if (max_len as usize) != size_of::<CSockFprog>() {
+        return_errno_with_message!(Errno::EINVAL, "optlen must equal struct sock_fprog size");
+    }
+
+    let fprog = current_userspace!().read_val::<CSockFprog>(addr)?;
+    validate_classic_bpf_len(fprog.len)?;
+
+    let nbytes = (fprog.len as usize) * size_of::<CSockFilter>();
+    let mut buf = vec![0u8; nbytes];
+    current_userspace!().read_bytes(fprog.filter, &mut buf)?;
+    Ok(fprog.len)
+}
+
+impl RawSocketOption for AttachFilter {
+    fn read_from_user(&mut self, addr: Vaddr, max_len: u32) -> Result<()> {
+        let len = read_sock_fprog_from_user(addr, max_len)?;
+        self.set(len);
+        Ok(())
+    }
+
+    fn write_to_user(&self, _addr: Vaddr, _max_len: &mut u32) -> Result<usize> {
+        return_errno_with_message!(Errno::ENOPROTOOPT, "the option is setter-only");
+    }
+
+    fn as_sock_option_mut(&mut self) -> &mut dyn SocketOption {
+        self
+    }
+
+    fn as_sock_option(&self) -> &dyn SocketOption {
+        self
+    }
+}
+
+impl RawSocketOption for DetachFilter {
+    fn read_from_user(&mut self, addr: Vaddr, max_len: u32) -> Result<()> {
+        // sk_detach_filter ignores the value, but sk_setsockopt first copies it.
+        if (max_len as usize) < size_of::<i32>() {
+            return_errno_with_message!(Errno::EINVAL, "the socket option is shorter than an int");
+        }
+        current_userspace!().read_val::<i32>(addr)?;
+        self.set(());
+        Ok(())
+    }
+
+    fn write_to_user(&self, _addr: Vaddr, _max_len: &mut u32) -> Result<usize> {
+        return_errno_with_message!(Errno::ENOPROTOOPT, "the option is setter-only");
+    }
+
+    fn as_sock_option_mut(&mut self) -> &mut dyn SocketOption {
+        self
+    }
+
+    fn as_sock_option(&self) -> &dyn SocketOption {
+        self
+    }
+}
+// K1 MUSE Book ---

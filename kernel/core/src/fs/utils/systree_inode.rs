@@ -10,7 +10,10 @@ use aster_systree::{
 use crate::{
     fs::{
         file::{AccessMode, InodeMode, InodeType, PerOpenFileOps, StatusFlags, SyncMode, mkmod},
-        utils::{self, DirentVisitor},
+        // K1 MUSE Book --- (system-tree views do not use the lookup caller's IDs)
+        // utils::{self, DirentVisitor},
+        utils::DirentVisitor,
+        // K1 MUSE Book ---
         vfs::{
             file_system::{FileSystem, SuperBlock},
             inode::{
@@ -72,7 +75,12 @@ pub(in crate::fs) trait SysTreeInodeTy: Send + Sync + 'static {
 
     fn new_metadata(ino: u64, type_: InodeType, sb: &SuperBlock) -> Metadata {
         let now = RealTimeCoarseClock::get().read_time();
-        let (uid, gid) = utils::current_fs_ids();
+        // K1 MUSE Book --- (lazy lookup must not transfer ownership of kernel objects)
+        // let (uid, gid) = utils::current_fs_ids();
+        // SysTree inodes are materialized on lookup, not only when objects are
+        // created. Keep their ownership independent of the task resolving them.
+        let (uid, gid) = (Uid::new_root(), Gid::new_root());
+        // K1 MUSE Book ---
         Metadata {
             ino,
             size: 0,

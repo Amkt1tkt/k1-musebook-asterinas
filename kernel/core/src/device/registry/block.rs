@@ -56,6 +56,29 @@ pub(super) fn init_in_first_kthread() {
         }
     }
 
+    // K1 MUSE Book --- (xHCI hotplug: hand newly attached MSC disks a BIO thread)
+    #[cfg(target_arch = "riscv64")]
+    {
+        ThreadOptions::new(|| {
+            let sleep_queue = ostd::sync::WaitQueue::new();
+            let sleep_duration = core::time::Duration::from_millis(250);
+            loop {
+                for usb in k1_musebook_usb::poll_hotplug() {
+                    ThreadOptions::new(move || {
+                        loop {
+                            usb.handle_requests();
+                        }
+                    })
+                    .spawn();
+                }
+                let _ =
+                    sleep_queue.wait_until_or_timeout(|| -> Option<()> { None }, &sleep_duration);
+            }
+        })
+        .spawn();
+    }
+    // K1 MUSE Book ---
+
     // Partition scanning performs synchronous block I/O, so the request
     // handling threads above must be available first.
     aster_block::scan_partitions();

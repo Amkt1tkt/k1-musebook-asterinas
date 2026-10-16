@@ -108,6 +108,16 @@ pub(crate) trait PagingConstsTrait: Clone + Debug + Send + Sync + 'static {
     const VA_SIGN_EXT: bool;
 }
 
+// K1 MUSE Book --- (32-bit DMA masters cannot reach high DRAM on the K1)
+/// Exclusive upper bound on physical addresses that 32-bit-addressing
+/// DMA masters on this platform can reach.
+///
+/// Device-visible allocations must satisfy `paddr + size <= dma_addr_limit()`.
+pub fn dma_addr_limit() -> Paddr {
+    crate::arch::mm::dma_addr_limit()
+}
+// K1 MUSE Book ---
+
 /// The page size
 pub const PAGE_SIZE: usize = page_size::<PagingConsts>(1);
 

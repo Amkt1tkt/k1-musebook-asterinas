@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
+// K1 MUSE Book --- (share the real fork operation with device-COW tests)
+#[cfg(ktest)]
+pub(super) use fork::cow_copy_pt_for_test;
+// K1 MUSE Book ---
+
 mod access_alien;
 mod fork;
 pub(super) mod map;

@@ -80,6 +80,17 @@ fn do_sys_pwritev(
         raw_fd, io_vec_ptr, io_vec_count, offset
     );
 
+    // K1 MUSE Book --- (k1.diag=stderr: pwritev to fd 2, same peek as writev)
+    if raw_fd == 2 && super::proc_diag::stderr_on() {
+        let user_space = ctx.user_space();
+        if let Ok(mut peek) =
+            VmReaderArray::from_user_io_vecs(&user_space, io_vec_ptr, io_vec_count)
+        {
+            super::proc_diag::tee_stderr(ctx, peek.readers_mut());
+        }
+    }
+    // K1 MUSE Book ---
+
     if offset < 0 {
         return_errno_with_message!(Errno::EINVAL, "offset cannot be negative");
     }
@@ -141,6 +152,19 @@ fn do_sys_writev(
         "raw_fd = {}, io_vec_ptr = 0x{:x}, io_vec_counter = 0x{:x}",
         raw_fd, io_vec_ptr, io_vec_count
     );
+
+    // K1 MUSE Book --- (k1.diag=stderr: writev to fd 2; Rust/glibc often use writev)
+    // `k1.diag=stderr`: see `sys_write`. Rust's stderr and glibc's stdio
+    // both reach fd 2 through `writev` as often as through `write`.
+    if raw_fd == 2 && super::proc_diag::stderr_on() {
+        let user_space = ctx.user_space();
+        if let Ok(mut peek) =
+            VmReaderArray::from_user_io_vecs(&user_space, io_vec_ptr, io_vec_count)
+        {
+            super::proc_diag::tee_stderr(ctx, peek.readers_mut());
+        }
+    }
+    // K1 MUSE Book ---
 
     let mut file_table = ctx.thread_local.borrow_file_table_mut();
     let file = get_file_fast!(&mut file_table, raw_fd.try_into()?);
